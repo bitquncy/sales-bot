@@ -1,0 +1,14 @@
+# Требуется Python >= 3.11 (asyncio.TimeoutError == встроенный TimeoutError,
+# typing X | Y, и т.п. — на 3.10 ловили баг с except TimeoutError).
+aiogram==3.29.1
+SQLAlchemy==2.0.51
+aiosqlite==0.22.1
+pydantic-settings==2.14.2
+anthropic==0.116.0
+openai==2.44.0
+aiohttp==3.14.1
+Telethon==1.44.0
+qrcode[pil]==8.2
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-cov==7.1.0

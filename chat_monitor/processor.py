@@ -1,0 +1,146 @@
+"""Обработка сообщений Chat Lead Monitor без активных действий в Telegram.
+
+Модуль работает только с events.NewMessage и не получает список участников чата.
+"""
+
+import logging
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from chat_monitor.filtering import find_keywords
+from chat_monitor.keywords_nail import KEYWORDS
+from db import repo
+from db.models import Lead, utcnow
+from services.ai import score_nail_chat_message
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class ChatMessageCandidate:
+    source_chat: str
+    user_id: int
+    username: str | None
+    message_text: str
+    message_date: datetime
+    message_id: int | None = None
+    niche: str = "nail"
+
+
+def _naive_utc(value: datetime | None) -> datetime:
+    if value is None:
+        return utcnow()
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _analysis_text(reasoning: str, is_solo_master: bool, matched_keywords: list[str]) -> str:
+    solo = "да" if is_solo_master else "нет"
+    keywords = ", ".join(matched_keywords) if matched_keywords else "нет"
+    return (
+        f"Chat Lead Monitor: {reasoning}\n"
+        f"Соло-мастер: {solo}\n"
+        f"Ключевые слова: {keywords}"
+    )
+
+
+async def process_candidate(
+    candidate: ChatMessageCandidate,
+    session_factory: async_sessionmaker[AsyncSession],
+    owner_tg_id: int,
+    min_score: float,
+    llm_client=None,
+    keywords=KEYWORDS,
+) -> Lead | None:
+    """Фильтрует, скорит и сохраняет релевантное сообщение как Lead."""
+    if owner_tg_id <= 0:
+        raise ValueError("CHAT_MONITOR_OWNER_TG_ID must be set")
+
+    matched = find_keywords(candidate.message_text, keywords)
+    if not matched:
+        return None
+
+    score, reasoning, is_solo_master = await score_nail_chat_message(
+        candidate.message_text,
+        username=candidate.username,
+        source_chat=candidate.source_chat,
+        client=llm_client,
+    )
+    if score < min_score:
+        logger.info(
+            "Chat lead skipped by score: score=%.3f min=%.3f chat=%s user=%s",
+            score,
+            min_score,
+            candidate.source_chat,
+            candidate.user_id,
+        )
+        return None
+
+    analysis = _analysis_text(reasoning, is_solo_master, matched)
+    async with session_factory() as session:
+        existing = await repo.find_chat_lead_by_message(
+            session,
+            owner_tg_id,
+            candidate.source_chat,
+            candidate.user_id,
+            candidate.message_id,
+        )
+        if existing is not None:
+            return existing
+        return await repo.create_chat_lead(
+            session,
+            owner_tg_id=owner_tg_id,
+            source_chat=candidate.source_chat,
+            user_id=candidate.user_id,
+            username=candidate.username,
+            message_text=candidate.message_text,
+            message_date=_naive_utc(candidate.message_date),
+            relevance_score=score,
+            llm_reasoning=analysis,
+            niche=candidate.niche,
+            message_id=candidate.message_id,
+        )
+
+
+async def candidate_from_event(event, niche: str = "nail") -> ChatMessageCandidate | None:
+    """Извлекает минимум данных из Telethon NewMessage event."""
+    message = getattr(event, "message", None)
+    text = (getattr(event, "raw_text", None) or getattr(message, "message", None) or "").strip()
+    if not text:
+        return None
+
+    sender = await event.get_sender()
+    user_id = getattr(sender, "id", None) or getattr(event, "sender_id", None)
+    if user_id is None:
+        return None
+
+    chat = await event.get_chat()
+    chat_id = getattr(event, "chat_id", None)
+    chat_title = getattr(chat, "title", None) or getattr(chat, "username", None) or "unknown_chat"
+    source_chat = f"{chat_title} ({chat_id})" if chat_id is not None else str(chat_title)
+
+    return ChatMessageCandidate(
+        source_chat=source_chat,
+        user_id=int(user_id),
+        username=getattr(sender, "username", None),
+        message_text=text,
+        message_date=_naive_utc(getattr(message, "date", None)),
+        message_id=getattr(message, "id", None),
+        niche=niche,
+    )
+
+
+async def process_event(
+    event,
+    session_factory: async_sessionmaker[AsyncSession],
+    owner_tg_id: int,
+    min_score: float,
+    llm_client=None,
+) -> Lead | None:
+    candidate = await candidate_from_event(event)
+    if candidate is None:
+        return None
+    return await process_candidate(candidate, session_factory, owner_tg_id, min_score, llm_client)

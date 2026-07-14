@@ -1,0 +1,33 @@
+# Виртуальные окружения
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Секреты и локальная конфигурация
+.env
+
+# База данных SQLite
+*.db
+*.sqlite
+*.sqlite3
+*.session
+*.session-journal
+
+# Покрытие тестами
+.coverage
+.coverage.*
+htmlcov/
+
+# IDE / ОС
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
