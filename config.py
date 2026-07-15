@@ -55,6 +55,21 @@ class Settings(BaseSettings):
     chat_monitor_chats: str = ""
     chat_monitor_min_score: float = 0.7
 
+    # --- P-1: Allowlist пользователей бота ---
+    # Comma-separated Telegram user IDs. Пусто = разрешены все (для личного бота).
+    allowed_user_ids: str = ""
+
+    # --- P-2: Дневной лимит LLM-вызовов (0 = без лимита) ---
+    llm_daily_limit: int = 0
+
+    # --- P-4: Heartbeat-мониторинг Chat Monitor ---
+    heartbeat_file: str = "chat_monitor.heartbeat"
+    heartbeat_interval_minutes: int = 5
+
+    # --- P-7: Автобэкап БД ---
+    backup_dir: str = "backups"
+    backup_keep: int = 14
+
     # --- Производные значения (учитывают legacy-переменные) ---
 
     @property
@@ -91,6 +106,19 @@ class Settings(BaseSettings):
             else:
                 chats.append(value)
         return chats
+
+    @property
+    def allowed_user_set(self) -> set[int]:
+        """Множество разрешённых Telegram user IDs из ALLOWED_USER_IDS.
+
+        Пустое множество = доступ не ограничен (личный бот).
+        """
+        result: set[int] = set()
+        for raw in self.allowed_user_ids.split(","):
+            value = raw.strip()
+            if value and value.lstrip("-").isdigit():
+                result.add(int(value))
+        return result
 
     @property
     def chat_monitor_ready(self) -> bool:

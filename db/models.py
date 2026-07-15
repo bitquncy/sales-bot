@@ -93,6 +93,15 @@ class Reminder(Base):
     is_sent: Mapped[bool] = mapped_column(default=False, index=True)
 
 
+class LLMCallLog(Base):
+    """Журнал LLM-вызовов для контроля дневного бюджета (P-2)."""
+
+    __tablename__ = "llm_call_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow, index=True)
+
+
 class ChatMonitorSettings(Base):
     __tablename__ = "chat_monitor_settings"
 

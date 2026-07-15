@@ -11,6 +11,7 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
+from config import settings
 from db import repo
 from db.base import session_factory
 from keyboards.main_menu import lead_card_kb, messages_kb
@@ -25,6 +26,7 @@ router = Router(name="messages")
 MSG_RATE_LIMIT = f"{E.TIMER} Слишком много запросов к AI. Попробуй через минуту."
 MSG_OVERLOADED = f"{E.TIMER} Бесплатная модель сейчас перегружена. Попробуй через минуту."
 MSG_AI_FAILED = f"{E.CROSS} Не получилось сгенерировать сообщения. Попробуй ещё раз чуть позже."
+MSG_BUDGET = f"{E.TIMER} Достигнут дневной лимит AI-вызовов. Попробуй завтра."
 
 
 def render_variants(name: str, short: str, long: str) -> str:
@@ -58,6 +60,14 @@ async def generate_for_lead(callback: CallbackQuery, state: FSMContext) -> None:
 
     await callback.answer()
     status = await safe_answer(callback.message, f"{E.WRITING} Генерирую варианты сообщений…")
+
+    # P-2: Проверка дневного лимита LLM-вызовов
+    async with session_factory() as session:
+        allowed, _count = await repo.check_llm_budget(session, settings.llm_daily_limit)
+    if not allowed:
+        await safe_edit(status, MSG_BUDGET)
+        return
+
     try:
         short, long = await generate_messages(lead.name, lead.ai_analysis)
     except AIRateLimitError:

@@ -6,14 +6,17 @@
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from html import escape
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from config import settings
 from chat_monitor.filtering import find_keywords
 from chat_monitor.keywords_nail import KEYWORDS
 from db import repo
 from db.models import Lead, utcnow
 from services.ai import score_nail_chat_message
+from utils.bot_api import send_bot_message
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +66,16 @@ async def process_candidate(
     if not matched:
         return None
 
+    # P-2: Проверка дневного лимита LLM-вызовов
+    async with session_factory() as session:
+        allowed, count = await repo.check_llm_budget(session, settings.llm_daily_limit)
+    if not allowed:
+        logger.warning(
+            "LLM daily limit reached (%d/%d), skipping chat message scoring: chat=%s user=%s",
+            count, settings.llm_daily_limit, candidate.source_chat, candidate.user_id,
+        )
+        return None
+
     score, reasoning, is_solo_master = await score_nail_chat_message(
         candidate.message_text,
         username=candidate.username,
@@ -90,7 +103,7 @@ async def process_candidate(
         )
         if existing is not None:
             return existing
-        return await repo.create_chat_lead(
+        lead = await repo.create_chat_lead(
             session,
             owner_tg_id=owner_tg_id,
             source_chat=candidate.source_chat,
@@ -103,6 +116,29 @@ async def process_candidate(
             niche=candidate.niche,
             message_id=candidate.message_id,
         )
+
+    # Realtime-уведомление о новом чат-лиде
+    if settings.bot_token and settings.chat_monitor_owner_tg_id:
+        try:
+            await _notify_new_lead(lead, settings.chat_monitor_owner_tg_id)
+        except Exception:
+            logger.debug("Failed to send new lead notification", exc_info=True)
+
+    return lead
+
+
+async def _notify_new_lead(lead: Lead, owner_tg_id: int) -> None:
+    """Отправляет уведомление о новом чат-лиде через Bot API."""
+    text = (
+        "🆕 Новый лид из чата!\n\n"
+        f"<b>{escape(lead.name)}</b>\n"
+        f"Чат: {escape(lead.source_chat or '')}\n"
+        f"Релевантность: {lead.relevance_score:.2f}\n"
+    )
+    if lead.message_text:
+        escaped = escape(lead.message_text[:200])
+        text += f"\n<i>{escaped}</i>"
+    await send_bot_message(settings.bot_token, owner_tg_id, text)
 
 
 async def candidate_from_event(event, niche: str = "nail") -> ChatMessageCandidate | None:

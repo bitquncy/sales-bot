@@ -6,6 +6,7 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
 
+from config import settings
 from db import repo
 from db.base import session_factory
 from handlers.company import format_lead_card
@@ -22,6 +23,7 @@ router = Router(name="analysis")
 MSG_RATE_LIMIT = f"{E.TIMER} Слишком много запросов к AI. Попробуй через минуту."
 MSG_OVERLOADED = f"{E.TIMER} Бесплатная модель сейчас перегружена. Попробуй через минуту."
 MSG_AI_FAILED = f"{E.CROSS} Не получилось выполнить анализ. Попробуй ещё раз чуть позже."
+MSG_BUDGET = f"{E.TIMER} Достигнут дневной лимит AI-вызовов. Попробуй завтра."
 
 
 async def _run_analysis(owner_tg_id: int, lead_id: int) -> tuple[bool, str]:
@@ -30,6 +32,13 @@ async def _run_analysis(owner_tg_id: int, lead_id: int) -> tuple[bool, str]:
         lead = await repo.get_lead(session, lead_id, owner_tg_id)
     if lead is None:
         return False, f"{E.CROSS} Лид не найден."
+
+    # P-2: Проверка дневного лимита LLM-вызовов
+    async with session_factory() as session:
+        allowed, _count = await repo.check_llm_budget(session, settings.llm_daily_limit)
+    if not allowed:
+        return False, MSG_BUDGET
+
     try:
         score, analysis, has_online_booking = await analyze_company(
             name=lead.name, address=lead.address, phone=lead.phone, website=lead.website

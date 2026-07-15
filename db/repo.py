@@ -11,7 +11,7 @@ from chat_monitor.config_store import (
     deserialize_chat_refs,
     serialize_chat_refs,
 )
-from db.models import ChatMonitorSettings, Lead, Reminder, User, is_valid_status, utcnow
+from db.models import ChatMonitorSettings, LLMCallLog, Lead, Reminder, User, is_valid_status, utcnow
 
 
 # ---------- User ----------
@@ -363,3 +363,85 @@ async def mark_reminder_sent(session: AsyncSession, reminder_id: int) -> None:
 async def mark_reminder_unsent(session: AsyncSession, reminder_id: int) -> None:
     """Откат при сбое отправки — напоминание будет переотправлено поллером."""
     await _set_reminder_sent(session, reminder_id, False)
+
+
+# ---------- LLM Call Logging (P-2) ----------
+
+async def log_llm_call(session: AsyncSession) -> None:
+    """Записывает факт LLM-вызова в журнал."""
+    session.add(LLMCallLog())
+    await session.commit()
+
+
+async def count_today_llm_calls(session: AsyncSession) -> int:
+    """Количество LLM-вызовов за сегодня (UTC)."""
+    today_start = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    result = await session.execute(
+        select(LLMCallLog).where(LLMCallLog.created_at >= today_start)
+    )
+    return len(list(result.scalars().all()))
+
+
+async def check_llm_budget(
+    session: AsyncSession, daily_limit: int = 0
+) -> tuple[bool, int]:
+    """Проверяет, не превышен ли дневной лимит LLM-вызовов.
+
+    Возвращает (разрешено, текущее_количество_вызовов).
+    Если daily_limit <= 0 — лимит отключён, всегда разрешено.
+    Логирует вызов только если разрешено.
+    """
+    count = await count_today_llm_calls(session)
+    if daily_limit > 0 and count >= daily_limit:
+        return False, count
+    await log_llm_call(session)
+    return True, count + 1
+
+
+# ---------- Delete Lead (P-6 / audit 11.14) ----------
+
+async def delete_lead(session: AsyncSession, lead_id: int, owner_tg_id: int) -> bool:
+    """Удаляет лид и связанные напоминания. True если удалён."""
+    lead = await get_lead(session, lead_id, owner_tg_id)
+    if lead is None:
+        return False
+    # Сначала удаляем напоминания, связанные с лидом
+    result = await session.execute(
+        select(Reminder).where(Reminder.lead_id == lead_id)
+    )
+    for reminder in result.scalars().all():
+        await session.delete(reminder)
+    await session.delete(lead)
+    await session.commit()
+    return True
+
+
+async def list_reminders_for_lead(
+    session: AsyncSession, lead_id: int, owner_tg_id: int
+) -> list[Reminder]:
+    """Список напоминаний для лида."""
+    result = await session.execute(
+        select(Reminder).where(
+            Reminder.lead_id == lead_id,
+            Reminder.owner_tg_id == owner_tg_id,
+        ).order_by(Reminder.remind_at)
+    )
+    return list(result.scalars().all())
+
+
+async def delete_reminder(
+    session: AsyncSession, reminder_id: int, owner_tg_id: int
+) -> bool:
+    """Удаляет напоминание. True если удалено."""
+    result = await session.execute(
+        select(Reminder).where(
+            Reminder.id == reminder_id,
+            Reminder.owner_tg_id == owner_tg_id,
+        )
+    )
+    reminder = result.scalar_one_or_none()
+    if reminder is None:
+        return False
+    await session.delete(reminder)
+    await session.commit()
+    return True

@@ -12,6 +12,7 @@ from config import settings
 from db.base import init_db, session_factory
 from handlers import analysis, chat_monitor, common, crm, menu, messages, search, start
 from services.reminders import reminders_loop
+from utils.access import AllowlistMiddleware
 
 logging.basicConfig(
     level=logging.INFO,
@@ -60,6 +61,12 @@ async def main() -> None:
 
     bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
+
+    # P-1: Глобальный allowlist — перехватывает все сообщения/callbackи
+    mw = AllowlistMiddleware()
+    dp.message.outer_middleware(mw)
+    dp.callback_query.outer_middleware(mw)
+
     dp.include_routers(
         common.commands_router,
         start.router,

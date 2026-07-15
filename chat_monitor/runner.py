@@ -81,6 +81,22 @@ async def event_matches_chat_refs(event, chat_refs: list[str]) -> bool:
     return False
 
 
+async def _heartbeat_loop() -> None:
+    """P-4: Периодически пишет timestamp в heartbeat-файл."""
+    from datetime import datetime, timezone
+
+    interval = settings.heartbeat_interval_minutes * 60
+    while True:
+        try:
+            ts = datetime.now(timezone.utc).isoformat()
+            with open(settings.heartbeat_file, "w", encoding="utf-8") as f:
+                f.write(ts)
+            logger.debug("Heartbeat written: %s", ts)
+        except Exception:
+            logger.debug("Failed to write heartbeat", exc_info=True)
+        await asyncio.sleep(interval)
+
+
 async def run() -> None:
     _ensure_ready()
     try:
@@ -147,7 +163,13 @@ async def run() -> None:
         getattr(me, "id", None),
         getattr(me, "username", None),
     )
-    await client.run_until_disconnected()
+
+    # P-4: Запускаем heartbeat-задачу параллельно с Telethon
+    heartbeat_task = asyncio.create_task(_heartbeat_loop())
+    try:
+        await client.run_until_disconnected()
+    finally:
+        heartbeat_task.cancel()
 
 
 def main() -> None:
