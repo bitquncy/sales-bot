@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 async def poll_reminders_once(bot, session_factory) -> int:
     """Один проход: отправить все просроченные неотправленные напоминания.
 
+    Лид загружается через selectinload в get_due_reminders — нет N+1 запросов (CODE-3).
     Возвращает число обработанных напоминаний.
     """
     processed = 0
@@ -34,7 +35,8 @@ async def poll_reminders_once(bot, session_factory) -> int:
             await repo.mark_reminder_sent(session, reminder.id)
             processed += 1
 
-            lead = await repo.get_lead(session, reminder.lead_id, reminder.owner_tg_id)
+            # Лид уже предзагружен через selectinload — нет дополнительного запроса
+            lead = reminder.lead
             lead_name = lead.name if lead else f"лид #{reminder.lead_id}"
             text = f"{E.TIMER} Напоминание по лиду <b>{escape(lead_name)}</b>"
             if reminder.text:

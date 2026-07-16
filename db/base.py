@@ -1,5 +1,6 @@
 """Async engine, sessionmaker и инициализация схемы БД."""
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
@@ -10,8 +11,24 @@ class Base(DeclarativeBase):
     pass
 
 
+def _set_sqlite_pragma(dbapi_conn, _connection_record) -> None:
+    """Включает FK-ограничения для каждого нового SQLite-соединения (DB-1).
+
+    SQLite не применяет FOREIGN KEY без явного PRAGMA на каждом соединении.
+    Без этого удаление лида напрямую через SQL оставит «висячие» напоминания.
+    """
+    cursor = dbapi_conn.cursor()
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
+
+
 def create_engine(db_url: str | None = None) -> AsyncEngine:
-    return create_async_engine(db_url or settings.db_url, echo=False)
+    url = db_url or settings.db_url
+    eng = create_async_engine(url, echo=False)
+    # Подключаем FK pragma только для SQLite
+    if url.startswith("sqlite"):
+        event.listen(eng.sync_engine, "connect", _set_sqlite_pragma)
+    return eng
 
 
 engine: AsyncEngine = create_engine()

@@ -1,0 +1,61 @@
+# Version control
+.git
+.gitignore
+
+# Python cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info
+dist/
+build/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Tests and dev tools
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Dev dependencies
+requirements-dev.txt
+
+# Internal documentation (не для клиентов)
+PROJECT_CONTEXT.txt
+*.zip
+*.md
+!README.md
+
+# Scripts not needed in container
+scripts/live_walkthrough.py
+scripts/telethon_qr_login.py
+
+# Deploy configs (не нужны внутри контейнера)
+deploy/
+
+# Runtime data (монтируется как том)
+*.db
+*.session
+*.heartbeat
+backups/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# GitHub Actions
+.github/

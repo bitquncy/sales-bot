@@ -1,11 +1,8 @@
-# Полный lock всего дерева зависимостей (pip freeze в чистом venv 3.11 после
-#   pip install -r requirements.txt). Верхнеуровневые версии — в requirements.txt;
-#   здесь зафиксированы И транзитивные, чтобы установка позже не подтянула
-#   несовместимую версию (как было с httpx: старый openai + новый httpx -> краш
-#   AsyncClient(... proxies=...)). Ставить прод строго так:
-#       pip install -r requirements-lock.txt
-# Регенерация после смены версий в requirements.txt: в чистом venv
-#   pip install -r requirements.txt && pip freeze > requirements-lock.txt
+# Production lock — только runtime-зависимости (без pytest/ruff/mypy/coverage).
+# Верхнеуровневые версии — в requirements.txt; здесь зафиксированы транзитивные.
+# Ставить прод строго так: pip install -r requirements-lock.txt
+# Dev/test: pip install -r requirements-lock.txt -r requirements-dev.txt
+# Регенерация: в чистом venv pip install -r requirements.txt && pip freeze > requirements-lock.txt
 # Проверено: pip check -> No broken requirements found (Python 3.11).
 aiofiles==25.1.0
 aiogram==3.29.1
@@ -19,7 +16,6 @@ anyio==4.14.1
 attrs==26.1.0
 certifi==2026.6.17
 colorama==0.4.6
-coverage==7.15.0
 distro==1.9.0
 docstring_parser==0.18.0
 frozenlist==1.8.0
@@ -28,25 +24,18 @@ h11==0.16.0
 httpcore==1.0.9
 httpx==0.28.1
 idna==3.18
-iniconfig==2.3.0
 jiter==0.16.0
 magic-filter==1.0.12
 multidict==6.7.1
 openai==2.44.0
 packaging==26.2
 pillow==12.3.0
-pluggy==1.6.0
 propcache==0.5.2
 pyasn1==0.6.4
 pyaes==1.6.1
 pydantic==2.13.4
 pydantic-settings==2.14.2
 pydantic_core==2.46.4
-Pygments==2.20.0
-qrcode==8.2
-pytest==9.1.1
-pytest-asyncio==1.4.0
-pytest-cov==7.1.0
 python-dotenv==1.2.2
 rsa==4.9.1
 sniffio==1.3.1

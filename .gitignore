@@ -21,6 +21,12 @@ __pycache__/
 *.session
 *.session-journal
 
+# Heartbeat-файл Chat Monitor
+chat_monitor.heartbeat
+
+# Бэкапы БД
+backups/
+
 # Покрытие тестами
 .coverage
 .coverage.*

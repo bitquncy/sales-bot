@@ -41,10 +41,12 @@ def test_build_query_strips_quotes_injection():
     # значит инъекция в QL невозможна.
     injected = q.split('area["name"="', 1)[1].split('"]', 1)[0]
     assert '"' not in injected
-    # _sanitize_ql вычищает кавычки, бэкслеш и QL-метасимволы [ ] ~, поэтому
-    # весь payload вырождается в безобидную строку внутри имени города.
-    # (normalize_city до санитайза приводит слова к Title Case: node->Node и т.д.)
-    assert 'Kazan;NodeAmenity=Bar;//' in q
+    # Whitelist-санитайзер (S-1) оставляет только буквы, цифры и безопасные символы.
+    # Из 'Kazan"];node["amenity"="bar"];//' остаётся только 'Kazan' (латиница + дефис/точка).
+    # Спецсимволы QL (;, [, ], {, }, >, ") полностью удалены.
+    assert ';' not in injected
+    assert '[' not in injected
+    assert ']' not in injected
 
 
 def test_normalize_city_fixes_case():

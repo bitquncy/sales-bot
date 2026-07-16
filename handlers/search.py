@@ -36,6 +36,9 @@ async def city_received(message: Message, state: FSMContext) -> None:
     if not city:
         await message.answer("Не понял город. Напиши текстом, например: Казань")
         return
+    if len(city) > 100:
+        await message.answer("Слишком длинное название города. Напиши короче (до 100 символов).")
+        return
     await state.update_data(city=city)
     await state.set_state(SearchFSM.waiting_category)
     await safe_answer(

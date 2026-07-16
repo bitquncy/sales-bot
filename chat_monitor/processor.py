@@ -12,11 +12,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from config import settings
 from chat_monitor.filtering import find_keywords
-from chat_monitor.keywords_nail import KEYWORDS
+from chat_monitor.keywords_nail import KEYWORDS as _DEFAULT_KEYWORDS
 from db import repo
 from db.models import Lead, utcnow
 from services.ai import score_nail_chat_message
 from utils.bot_api import send_bot_message
+
+
+def _get_keywords() -> tuple[str, ...]:
+    """Возвращает ключевые слова из конфига или встроенные (ARCH-2)."""
+    custom = settings.chat_monitor_keywords_list
+    return custom if custom is not None else _DEFAULT_KEYWORDS
 
 logger = logging.getLogger(__name__)
 
@@ -56,13 +62,17 @@ async def process_candidate(
     owner_tg_id: int,
     min_score: float,
     llm_client=None,
-    keywords=KEYWORDS,
+    keywords: tuple[str, ...] | None = None,
 ) -> Lead | None:
-    """Фильтрует, скорит и сохраняет релевантное сообщение как Lead."""
+    """Фильтрует, скорит и сохраняет релевантное сообщение как Lead.
+
+    keywords=None → берёт из конфига (CHAT_MONITOR_KEYWORDS) или встроенные (ARCH-2).
+    """
     if owner_tg_id <= 0:
         raise ValueError("CHAT_MONITOR_OWNER_TG_ID must be set")
 
-    matched = find_keywords(candidate.message_text, keywords)
+    effective_keywords = keywords if keywords is not None else _get_keywords()
+    matched = find_keywords(candidate.message_text, effective_keywords)
     if not matched:
         return None
 

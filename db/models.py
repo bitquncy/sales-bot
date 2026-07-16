@@ -3,8 +3,8 @@
 import enum
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from db.base import Base
 
@@ -72,7 +72,7 @@ class Lead(Base):
     source_chat: Mapped[str | None] = mapped_column(String(500), nullable=True)
     chat_username: Mapped[str | None] = mapped_column(String(255), nullable=True)
     chat_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
-    chat_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    chat_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
     message_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     message_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     relevance_score: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -81,16 +81,31 @@ class Lead(Base):
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
 
+    # Каскадное удаление напоминаний при удалении лида (CODE-1)
+    reminders: Mapped[list["Reminder"]] = relationship(
+        "Reminder", back_populates="lead", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+    # Составной индекс для быстрой дедупликации chat-лидов (DB-2)
+    __table_args__ = (
+        Index(
+            "ix_chat_lead_dedup",
+            "owner_tg_id", "source_chat", "chat_user_id", "chat_message_id",
+        ),
+    )
+
 
 class Reminder(Base):
     __tablename__ = "reminders"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id"), index=True)
+    lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id", ondelete="CASCADE"), index=True)
     owner_tg_id: Mapped[int] = mapped_column(BigInteger, index=True)
     remind_at: Mapped[datetime] = mapped_column(index=True)
     text: Mapped[str] = mapped_column(Text, default="")
     is_sent: Mapped[bool] = mapped_column(default=False, index=True)
+
+    lead: Mapped["Lead"] = relationship("Lead", back_populates="reminders")
 
 
 class LLMCallLog(Base):

@@ -1,0 +1,18 @@
+[Unit]
+Description=Sales Agent Chat Monitor (Telethon userbot)
+After=network.target sales-bot.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/path/to/sales_agent_bot
+ExecStart=/path/to/sales_agent_bot/venv/bin/python -m chat_monitor.runner
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sales-chat-monitor
+
+[Install]
+WantedBy=multi-user.target

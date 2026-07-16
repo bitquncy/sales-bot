@@ -1,18 +1,20 @@
 """Этапы 5-6: CRM-лайт (лиды, статусы, заметки) и напоминания."""
 
+import csv
+import io
 import logging
 from datetime import datetime, timedelta
 from html import escape
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from db import repo
 from db.base import session_factory
 from db.models import STATUS_LABELS, is_valid_status, utcnow
 from handlers.company import format_lead_card
-from keyboards.main_menu import lead_card_kb, leads_filter_kb, reminder_kb, statuses_kb
+from keyboards.main_menu import lead_card_kb, leads_filter_kb, reminder_kb, reminders_list_kb, statuses_kb
 from states.fsm import NoteFSM, ReminderFSM
 from utils.emoji_config import E, P
 from utils.safe_send import safe_answer, safe_edit
@@ -39,6 +41,101 @@ def parse_custom_date(raw: str) -> datetime | None:
     return None
 
 
+# ---------- Экспорт CSV ----------
+
+@router.callback_query(F.data == "leads:export")
+async def export_leads_csv(callback: CallbackQuery) -> None:
+    """Экспортирует все лиды пользователя в CSV и отправляет файлом."""
+    async with session_factory() as session:
+        leads = await repo.list_leads(session, callback.from_user.id)
+
+    if not leads:
+        await callback.answer(f"{P.INFO} Нет лидов для экспорта.", show_alert=True)
+        return
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "id", "name", "status", "source", "phone", "website", "address",
+        "ai_score", "has_online_booking", "niche", "source_chat",
+        "chat_username", "relevance_score", "note", "created_at", "updated_at",
+    ])
+    for lead in leads:
+        writer.writerow([
+            lead.id,
+            lead.name,
+            lead.status,
+            lead.source,
+            lead.phone or "",
+            lead.website or "",
+            lead.address or "",
+            lead.ai_score if lead.ai_score is not None else "",
+            "" if lead.has_online_booking is None else str(lead.has_online_booking).lower(),
+            lead.niche or "",
+            lead.source_chat or "",
+            lead.chat_username or "",
+            f"{lead.relevance_score:.2f}" if lead.relevance_score is not None else "",
+            lead.note or "",
+            lead.created_at.strftime("%Y-%m-%d %H:%M") if lead.created_at else "",
+            lead.updated_at.strftime("%Y-%m-%d %H:%M") if lead.updated_at else "",
+        ])
+
+    csv_bytes = output.getvalue().encode("utf-8-sig")  # BOM для корректного Excel
+    filename = f"leads_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    await callback.message.answer_document(
+        BufferedInputFile(csv_bytes, filename),
+        caption=f"{E.LIST} Экспортировано лидов: {len(leads)}",
+    )
+    await callback.answer()
+
+
+# ---------- Удаление лида ----------
+
+@router.callback_query(F.data.startswith("del:"))
+async def delete_lead_confirm(callback: CallbackQuery) -> None:
+    """Показывает подтверждение удаления лида."""
+    try:
+        lead_id = int(callback.data.split(":", 1)[1])
+    except ValueError:
+        await callback.answer(MSG_BAD_DATA, show_alert=True)
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"delyes:{lead_id}"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data=f"lead:{lead_id}"),
+        ],
+    ])
+    await safe_answer(
+        callback.message,
+        f"{E.WARNING} Удалить этот лид безвозвратно? Удалятся также связанные напоминания.",
+        reply_markup=kb,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("delyes:"))
+async def delete_lead_confirmed(callback: CallbackQuery) -> None:
+    """Удаляет лид после подтверждения."""
+    try:
+        lead_id = int(callback.data.split(":", 1)[1])
+    except ValueError:
+        await callback.answer(MSG_BAD_DATA, show_alert=True)
+        return
+    async with session_factory() as session:
+        deleted = await repo.delete_lead(session, lead_id, callback.from_user.id)
+    if not deleted:
+        await callback.answer(MSG_LEAD_NOT_FOUND, show_alert=True)
+        return
+    await safe_answer(
+        callback.message,
+        f"{E.CHECK} Лид удалён.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="↩ К лидам", callback_data="menu:leads")],
+        ]),
+    )
+    await callback.answer()
+
+
 # ---------- Список лидов ----------
 
 @router.callback_query(F.data == "menu:leads")
@@ -52,30 +149,47 @@ async def show_leads_menu(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith("leads:"))
 async def list_leads_filtered(callback: CallbackQuery) -> None:
-    raw_filter = callback.data.split(":", 1)[1]
+    raw = callback.data.split(":", 1)[1]
 
+    # Экспорт обрабатывается отдельным хендлером выше (L-4: явная защита от порядка регистрации)
+    if raw == "export":
+        return
+
+    # Поддержка пагинации: leads:all:1, leads:new:2, leads:no_booking:0 и т.д.
+    parts = raw.rsplit(":", 1)
+    raw_filter = parts[0]
+    try:
+        page = int(parts[1]) if len(parts) == 2 else 0
+    except ValueError:
+        page = 0
+
+    page_size = repo.PAGE_SIZE
+    offset = page * page_size
+
+    # Разбираем фильтр в единый набор kwargs для repo (CODE-5: убрано дублирование)
+    filter_kwargs: dict = {}
     if raw_filter == "no_booking":
-        # Спец-фильтр: проанализированные лиды без онлайн-записи (самые перспективные).
-        async with session_factory() as session:
-            leads = await repo.list_leads(
-                session, callback.from_user.id, only_no_booking=True
-            )
+        filter_kwargs["only_no_booking"] = True
         label = "Без онлайн-записи"
     elif raw_filter == "chat_monitor":
-        async with session_factory() as session:
-            leads = await repo.list_leads(
-                session, callback.from_user.id, source="chat_monitor"
-            )
+        filter_kwargs["source"] = "chat_monitor"
         label = "Chat Monitor"
     else:
         status = None if raw_filter == "all" else raw_filter
         if status is not None and not is_valid_status(status):
             await callback.answer(MSG_INVALID_STATUS, show_alert=True)
             return
-        async with session_factory() as session:
-            leads = await repo.list_leads(session, callback.from_user.id, status)
+        if status is not None:
+            filter_kwargs["status"] = status
         label = "Все" if status is None else STATUS_LABELS[status]
-    if not leads:
+
+    async with session_factory() as session:
+        total = await repo.count_leads(session, callback.from_user.id, **filter_kwargs)
+        leads = await repo.list_leads(
+            session, callback.from_user.id, offset=offset, limit=page_size, **filter_kwargs
+        )
+
+    if not leads and page == 0:
         await safe_answer(
             callback.message,
             f"{E.INFO} По фильтру «{label}» лидов пока нет.\n"
@@ -86,15 +200,28 @@ async def list_leads_filtered(callback: CallbackQuery) -> None:
 
     rows = [
         [InlineKeyboardButton(
-            text=f"{lead.name[:40]} · {STATUS_LABELS.get(lead.status, lead.status)}",
+            text=f"{lead.name[:35]} · {STATUS_LABELS.get(lead.status, lead.status)}"
+                 + (f" · {lead.ai_score}" if lead.ai_score is not None else ""),
             callback_data=f"lead:{lead.id}",
         )]
-        for lead in leads[:50]
+        for lead in leads
     ]
+
+    # Навигация по страницам
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    if total_pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(text="◀", callback_data=f"leads:{raw_filter}:{page - 1}"))
+        nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton(text="▶", callback_data=f"leads:{raw_filter}:{page + 1}"))
+        rows.append(nav)
+
     rows.append([InlineKeyboardButton(text="↩ Фильтры", callback_data="menu:leads")])
     await safe_answer(
         callback.message,
-        f"{E.PEOPLE} Лиды ({label}): {len(leads)}",
+        f"{E.PEOPLE} Лиды ({label}): {total}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
     await callback.answer()
@@ -109,13 +236,16 @@ async def show_lead_card(callback: CallbackQuery, state: FSMContext) -> None:
         return
     async with session_factory() as session:
         lead = await repo.get_lead(session, lead_id, callback.from_user.id)
+        reminders = await repo.list_reminders_for_lead(session, lead_id, callback.from_user.id)
     if lead is None:
         await callback.answer(MSG_LEAD_NOT_FOUND, show_alert=True)
         return
+    # Считаем только неотправленные напоминания для счётчика на кнопке
+    pending = [r for r in reminders if not r.is_sent]
     await safe_answer(
         callback.message,
         format_lead_card(lead),
-        reply_markup=lead_card_kb(lead.id, has_analysis=bool(lead.ai_analysis)),
+        reply_markup=lead_card_kb(lead.id, has_analysis=bool(lead.ai_analysis), reminder_count=len(pending)),
     )
     await callback.answer()
 
@@ -193,6 +323,9 @@ async def note_received(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
     if not text:
         await message.answer("Пустая заметка не сохранится. Пришли текст.")
+        return
+    if len(text) > 2000:
+        await message.answer("Заметка слишком длинная (максимум 2000 символов). Сократи текст.")
         return
     data = await state.get_data()
     lead_id = data.get("note_lead_id")
@@ -284,12 +417,70 @@ async def reminder_custom_received(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith("rem:"))
 async def reminder_menu(callback: CallbackQuery) -> None:
+    """Показывает список активных напоминаний + кнопки добавления нового."""
     try:
         lead_id = int(callback.data.split(":", 1)[1])
     except ValueError:
         await callback.answer(MSG_BAD_DATA, show_alert=True)
         return
-    await safe_answer(
-        callback.message, f"{E.TIMER} Когда напомнить об этом лиде?", reply_markup=reminder_kb(lead_id)
-    )
+    async with session_factory() as session:
+        reminders = await repo.list_reminders_for_lead(session, lead_id, callback.from_user.id)
+    pending = [r for r in reminders if not r.is_sent]
+    if pending:
+        lines = [f"{E.TIMER} Активные напоминания для этого лида:"]
+        for r in pending:
+            lines.append(f"• {r.remind_at.strftime('%d.%m.%Y %H:%M')} UTC — {r.text[:60] if r.text else '—'}")
+        lines.append("\nНажми на дату чтобы удалить, или добавь новое:")
+        await safe_answer(
+            callback.message,
+            "\n".join(lines),
+            reply_markup=reminders_list_kb(lead_id, pending),
+        )
+    else:
+        await safe_answer(
+            callback.message,
+            f"{E.TIMER} Когда напомнить об этом лиде?",
+            reply_markup=reminder_kb(lead_id),
+        )
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("remdel:"))
+async def delete_reminder_handler(callback: CallbackQuery) -> None:
+    """Удаляет напоминание по кнопке из списка."""
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer(MSG_BAD_DATA, show_alert=True)
+        return
+    try:
+        reminder_id = int(parts[1])
+        lead_id = int(parts[2])
+    except ValueError:
+        await callback.answer(MSG_BAD_DATA, show_alert=True)
+        return
+    async with session_factory() as session:
+        deleted = await repo.delete_reminder(session, reminder_id, callback.from_user.id)
+    if not deleted:
+        await callback.answer("Напоминание уже удалено.", show_alert=True)
+        return
+    # Обновляем список напоминаний
+    async with session_factory() as session:
+        reminders = await repo.list_reminders_for_lead(session, lead_id, callback.from_user.id)
+    pending = [r for r in reminders if not r.is_sent]
+    await callback.answer(f"{E.CHECK} Напоминание удалено.")
+    if pending:
+        lines = [f"{E.TIMER} Активные напоминания:"]
+        for r in pending:
+            lines.append(f"• {r.remind_at.strftime('%d.%m.%Y %H:%M')} UTC — {r.text[:60] if r.text else '—'}")
+        lines.append("\nНажми на дату чтобы удалить, или добавь новое:")
+        await safe_answer(
+            callback.message,
+            "\n".join(lines),
+            reply_markup=reminders_list_kb(lead_id, pending),
+        )
+    else:
+        await safe_answer(
+            callback.message,
+            f"{E.TIMER} Напоминаний нет. Когда напомнить об этом лиде?",
+            reply_markup=reminder_kb(lead_id),
+        )

@@ -13,7 +13,6 @@
 Ротация: остаётся последние backup_keep копий (по умолчанию 14).
 """
 
-import os
 import shutil
 import sys
 from datetime import datetime, timezone

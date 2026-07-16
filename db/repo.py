@@ -2,7 +2,8 @@
 
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from chat_monitor.config_store import (
@@ -257,14 +258,40 @@ async def get_lead(session: AsyncSession, lead_id: int, owner_tg_id: int) -> Lea
     return result.scalar_one_or_none()
 
 
+PAGE_SIZE = 50  # Максимум лидов на одну страницу в UI
+
+
+async def count_leads(
+    session: AsyncSession,
+    owner_tg_id: int,
+    status: str | None = None,
+    only_no_booking: bool = False,
+    source: str | None = None,
+) -> int:
+    """Количество лидов по фильтру без загрузки строк."""
+    query = select(func.count()).select_from(Lead).where(Lead.owner_tg_id == owner_tg_id)
+    if status is not None:
+        if not is_valid_status(status):
+            raise ValueError(f"Invalid status filter: {status!r}")
+        query = query.where(Lead.status == status)
+    if only_no_booking:
+        query = query.where(Lead.has_online_booking.is_(False))
+    if source is not None:
+        query = query.where(Lead.source == source)
+    return (await session.execute(query)).scalar_one()
+
+
 async def list_leads(
     session: AsyncSession,
     owner_tg_id: int,
     status: str | None = None,
     only_no_booking: bool = False,
     source: str | None = None,
+    offset: int = 0,
+    limit: int = PAGE_SIZE,
 ) -> list[Lead]:
-    query = select(Lead).where(Lead.owner_tg_id == owner_tg_id).order_by(Lead.updated_at.desc())
+    # Фильтры строятся ДО offset/limit — корректный порядок для SQL (CODE-2)
+    query = select(Lead).where(Lead.owner_tg_id == owner_tg_id)
     if status is not None:
         if not is_valid_status(status):
             raise ValueError(f"Invalid status filter: {status!r}")
@@ -275,6 +302,7 @@ async def list_leads(
         query = query.where(Lead.has_online_booking.is_(False))
     if source is not None:
         query = query.where(Lead.source == source)
+    query = query.order_by(Lead.updated_at.desc()).offset(offset).limit(limit)
     result = await session.execute(query)
     return list(result.scalars().all())
 
@@ -341,19 +369,22 @@ async def create_reminder(
 
 
 async def get_due_reminders(session: AsyncSession, now: datetime | None = None) -> list[Reminder]:
+    """Возвращает просроченные напоминания с предзагрузкой лида (устраняет N+1, CODE-3)."""
     now = now or utcnow()
     result = await session.execute(
-        select(Reminder).where(Reminder.remind_at <= now, Reminder.is_sent.is_(False))
+        select(Reminder)
+        .options(selectinload(Reminder.lead))
+        .where(Reminder.remind_at <= now, Reminder.is_sent.is_(False))
     )
     return list(result.scalars().all())
 
 
 async def _set_reminder_sent(session: AsyncSession, reminder_id: int, value: bool) -> None:
-    result = await session.execute(select(Reminder).where(Reminder.id == reminder_id))
-    reminder = result.scalar_one_or_none()
-    if reminder is not None:
-        reminder.is_sent = value
-        await session.commit()
+    """Один UPDATE вместо SELECT + UPDATE (CODE-4)."""
+    await session.execute(
+        update(Reminder).where(Reminder.id == reminder_id).values(is_sent=value)
+    )
+    await session.commit()
 
 
 async def mark_reminder_sent(session: AsyncSession, reminder_id: int) -> None:
@@ -374,12 +405,12 @@ async def log_llm_call(session: AsyncSession) -> None:
 
 
 async def count_today_llm_calls(session: AsyncSession) -> int:
-    """Количество LLM-вызовов за сегодня (UTC)."""
+    """Количество LLM-вызовов за сегодня (UTC). Использует COUNT(*) — не загружает строки."""
     today_start = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     result = await session.execute(
-        select(LLMCallLog).where(LLMCallLog.created_at >= today_start)
+        select(func.count()).select_from(LLMCallLog).where(LLMCallLog.created_at >= today_start)
     )
-    return len(list(result.scalars().all()))
+    return result.scalar_one()
 
 
 async def check_llm_budget(
@@ -401,16 +432,14 @@ async def check_llm_budget(
 # ---------- Delete Lead (P-6 / audit 11.14) ----------
 
 async def delete_lead(session: AsyncSession, lead_id: int, owner_tg_id: int) -> bool:
-    """Удаляет лид и связанные напоминания. True если удалён."""
+    """Удаляет лид и связанные напоминания атомарно. True если удалён.
+
+    Каскадное удаление напоминаний обеспечивается relationship(cascade="all, delete-orphan")
+    в модели Lead — нет риска «висячих» напоминаний при сбое между операциями (CODE-1).
+    """
     lead = await get_lead(session, lead_id, owner_tg_id)
     if lead is None:
         return False
-    # Сначала удаляем напоминания, связанные с лидом
-    result = await session.execute(
-        select(Reminder).where(Reminder.lead_id == lead_id)
-    )
-    for reminder in result.scalars().all():
-        await session.delete(reminder)
     await session.delete(lead)
     await session.commit()
     return True
@@ -445,3 +474,46 @@ async def delete_reminder(
     await session.delete(reminder)
     await session.commit()
     return True
+
+
+# ---------- Stats (AD-1) ----------
+
+async def get_stats(session: AsyncSession, owner_tg_id: int) -> dict:
+    """Агрегированная статистика для команды /stats.
+
+    Оптимизировано: 3 запроса вместо 5 (ARCH-6).
+    Источники и статусы получаются через GROUP BY, а не отдельными COUNT.
+    """
+    # Запрос 1: количество лидов по статусам (один GROUP BY вместо N запросов)
+    status_rows = (await session.execute(
+        select(Lead.status, func.count())
+        .where(Lead.owner_tg_id == owner_tg_id)
+        .group_by(Lead.status)
+    )).all()
+    statuses = {row[0]: row[1] for row in status_rows}
+    total = sum(statuses.values())
+
+    # Запрос 2: количество лидов по источникам (один GROUP BY)
+    source_rows = (await session.execute(
+        select(Lead.source, func.count())
+        .where(Lead.owner_tg_id == owner_tg_id)
+        .group_by(Lead.source)
+    )).all()
+    sources = {row[0]: row[1] for row in source_rows}
+
+    # Запрос 3: LLM-вызовы сегодня + активные напоминания (два лёгких COUNT)
+    llm_today = await count_today_llm_calls(session)
+    pending_reminders = (await session.execute(
+        select(func.count()).select_from(Reminder).where(
+            Reminder.owner_tg_id == owner_tg_id, Reminder.is_sent.is_(False)
+        )
+    )).scalar_one()
+
+    return {
+        "total": total,
+        "osm": sources.get("osm", 0),
+        "chat_monitor": sources.get("chat_monitor", 0),
+        "statuses": statuses,
+        "llm_today": llm_today,
+        "pending_reminders": pending_reminders,
+    }

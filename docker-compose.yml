@@ -1,0 +1,60 @@
+version: "3.9"
+
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - bot_data:/app/data
+    environment:
+      - DB_URL=sqlite+aiosqlite:////app/data/sales_agent.db
+      - CHAT_MONITOR_SESSION_PATH=/app/data/chat_monitor.session
+      - HEARTBEAT_FILE=/app/data/chat_monitor.heartbeat
+      - BACKUP_DIR=/app/data/backups
+    # Healthcheck: проверяем что процесс Python жив и БД доступна
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import sqlite3, os; db=os.environ.get('DB_URL','').split('///')[-1]; sqlite3.connect(db).execute('SELECT 1')"]
+      interval: 60s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+
+  chat_monitor:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - bot_data:/app/data
+    environment:
+      - DB_URL=sqlite+aiosqlite:////app/data/sales_agent.db
+      - CHAT_MONITOR_SESSION_PATH=/app/data/chat_monitor.session
+      - HEARTBEAT_FILE=/app/data/chat_monitor.heartbeat
+    command: ["python", "-m", "chat_monitor.runner"]
+    # Healthcheck: проверяем свежесть heartbeat-файла (не старше 15 минут)
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import os,time; f=os.environ.get('HEARTBEAT_FILE','chat_monitor.heartbeat'); \
+              t=os.path.getmtime(f) if os.path.exists(f) else 0; \
+              exit(0 if time.time()-t < 900 else 1)"]
+      interval: 60s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+    # Запускать только если Telethon настроен:
+    profiles: ["monitor"]
+
+  backup:
+    build: .
+    env_file: .env
+    volumes:
+      - bot_data:/app/data
+    environment:
+      - DB_URL=sqlite+aiosqlite:////app/data/sales_agent.db
+      - BACKUP_DIR=/app/data/backups
+    command: ["python", "-m", "scripts.backup_db"]
+    profiles: ["backup"]
+
+volumes:
+  bot_data:

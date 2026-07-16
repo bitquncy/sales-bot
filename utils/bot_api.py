@@ -11,6 +11,13 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 
+def _mask_token(token: str) -> str:
+    """Маскирует токен бота для безопасного логирования (S-2)."""
+    if len(token) <= 8:
+        return "***"
+    return token[:4] + "***" + token[-4:]
+
+
 async def send_bot_message(
     bot_token: str,
     chat_id: int,
@@ -21,6 +28,7 @@ async def send_bot_message(
 
     Best-effort: ошибки логируются, но не бросаются наверх —
     уведомление не должно ломать основной процесс.
+    Токен в логах маскируется (S-2).
     """
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = {
@@ -33,9 +41,12 @@ async def send_bot_message(
             async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status != 200:
                     body = await resp.text()
-                    logger.error("Bot API sendMessage failed (HTTP %s): %s", resp.status, body[:200])
+                    logger.error(
+                        "Bot API sendMessage failed (HTTP %s) token=%s chat_id=%s: %s",
+                        resp.status, _mask_token(bot_token), chat_id, body[:200],
+                    )
                     return False
                 return True
     except Exception as exc:
-        logger.error("Bot API sendMessage error: %s", exc)
+        logger.error("Bot API sendMessage error (chat_id=%s): %s", chat_id, exc)
         return False

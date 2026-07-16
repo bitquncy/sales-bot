@@ -2,11 +2,13 @@
 
 Бесплатно, без ключей. Лимит результатов MAX_LIMIT — без него Overpass
 может вернуть тысячи строк и повесить бота.
+Результаты кэшируются в памяти на CACHE_TTL_SECONDS (PERF-1).
 """
 
 import asyncio
 import logging
 import re
+import time
 from dataclasses import dataclass
 
 import aiohttp
@@ -16,6 +18,12 @@ logger = logging.getLogger(__name__)
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 MAX_LIMIT = 60
 REQUEST_TIMEOUT_SECONDS = 40
+# TTL кэша результатов Overpass в секундах (PERF-1).
+# Повторный запрос того же города+категории в течение этого времени не идёт в сеть.
+CACHE_TTL_SECONDS = 1800  # 30 минут
+
+# Простой in-memory кэш: ключ -> (timestamp, результат)
+_overpass_cache: dict[str, tuple[float, list]] = {}
 
 # Категории бизнеса -> OSM-теги (key, value)
 CATEGORIES: dict[str, tuple[str, str, str]] = {
@@ -52,15 +60,18 @@ class Company:
 
 
 def _sanitize_ql(value: str) -> str:
-    """Убирает символы, ломающие Overpass QL: кавычки, бэкслеш, [ ] ~.
+    """Whitelist-фильтр для значений, подставляемых в Overpass QL (S-1).
 
-    Значение подставляется внутрь "..." в QL. Эти символы либо закрывают
-    строку/фильтр раньше времени (инъекция), либо просто дают синтаксически
-    битый запрос -> PlacesError там, где мог бы быть нормальный результат.
+    Разрешаем только символы, встречающиеся в реальных топонимах:
+    буквы (любые Unicode), цифры, пробел, дефис, точку, апостроф, скобки
+    (для «Ростов-на-Дону», «Нур-Султан», «Алма-Ата» и т.п.).
+    Всё остальное — удаляем. Это надёжнее blacklist: новые QL-спецсимволы
+    (;, {, }, ->, .a и т.д.) не попадут в запрос автоматически.
     """
-    for ch in ('\\', '"', "[", "]", "~"):
-        value = value.replace(ch, "")
-    return value
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                  "абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ"
+                  "0123456789 -.'()")
+    return "".join(ch for ch in value if ch in allowed)
 
 
 # Служебные слова, которые OSM держит в НИЖНЕМ регистре внутри составных
@@ -194,9 +205,23 @@ async def _request_overpass(query: str) -> dict:
 
 
 async def search_companies(city: str, category_slug: str) -> list[Company]:
-    """Поиск компаний. Бросает PlacesError при любой проблеме с API."""
+    """Поиск компаний с TTL-кэшем результатов (PERF-1).
+
+    Повторный запрос того же города+категории в течение CACHE_TTL_SECONDS
+    возвращает кэшированный результат без обращения к Overpass API.
+    Бросает PlacesError при любой проблеме с API.
+    """
     if category_slug not in CATEGORIES:
         raise PlacesError(f"Unknown category: {category_slug!r}")
+
+    cache_key = f"{normalize_city(city)}:{category_slug}"
+    now = time.monotonic()
+    if cache_key in _overpass_cache:
+        cached_at, cached_result = _overpass_cache[cache_key]
+        if now - cached_at < CACHE_TTL_SECONDS:
+            logger.debug("Overpass cache hit: city=%r category=%r", city, category_slug)
+            return cached_result
+
     _, tag_key, tag_value = CATEGORIES[category_slug]
     query = build_query(city, tag_key, tag_value)
     try:
@@ -204,4 +229,6 @@ async def search_companies(city: str, category_slug: str) -> list[Company]:
     except PlacesError as exc:
         logger.error("Overpass search failed for city=%r category=%r: %s", city, category_slug, exc)
         raise
-    return parse_elements(data)
+    result = parse_elements(data)
+    _overpass_cache[cache_key] = (now, result)
+    return result

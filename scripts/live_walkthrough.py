@@ -36,7 +36,7 @@ from handlers import analysis, crm, menu, messages, search, start  # noqa: E402
 from handlers.company import format_company_card, format_lead_card  # noqa: E402
 from services import reminders as reminders_svc  # noqa: E402
 from services.places import PlacesError, search_companies  # noqa: E402
-from states.fsm import EditMessageFSM, NoteFSM, ReminderFSM, SearchFSM  # noqa: E402
+from states.fsm import SearchFSM  # noqa: E402
 
 # Fake-объекты для прямого вызова хендлеров (те же, что в pytest).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tests"))
@@ -372,7 +372,7 @@ async def step6_crm(pool: dict[str, list[dict]]) -> list[int]:
         await search.save_from_search(cb, st)
     async with session_factory() as s:
         leads = await repo.list_leads(s, USER_ID)
-    saved_ids = [l.id for l in leads]
+    saved_ids = [lead.id for lead in leads]
     print(f"  Сохранено лидов всего в БД: {len(leads)}")
 
     # Меняем статусы.

@@ -12,7 +12,6 @@ import json
 
 import pytest
 
-import services.ai as ai
 from config import settings
 from services.ai import (
     AIError,
@@ -20,10 +19,17 @@ from services.ai import (
     AIRateLimitError,
     AnthropicClient,
     OpenAICompatClient,
-    analyze_company,
-    generate_messages,
     get_client,
+    reset_client,
 )
+
+
+@pytest.fixture(autouse=True)
+def reset_llm_singleton():
+    """Сбрасывает синглтон LLM-клиента перед каждым тестом для изоляции."""
+    reset_client()
+    yield
+    reset_client()
 
 
 # --------------------------------------------------------------------------- #

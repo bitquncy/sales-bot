@@ -8,14 +8,14 @@
 from html import escape
 from urllib.parse import quote
 
+from config import settings
 from db.models import STATUS_LABELS, Lead
 from utils.emoji_config import E
 
-# Домен 2ГИС по умолчанию. Бот ориентирован на Казахстан (Астана/Алматы) ->
-# 2gis.kz. Для РФ-рынка можно поменять на 2gis.ru; авто-определение по стране
-# города осознанно не делаем (city->country ненадёжно, а ссылка-поиск и так
-# находит компанию по названию независимо от поддомена).
-_GIS_DOMAIN = "2gis.kz"
+# Домен 2ГИС берётся из конфига (ARCH-3).
+# Дефолт: 2gis.kz (Казахстан). Для РФ: GIS_DOMAIN=2gis.ru в .env.
+def _gis_domain() -> str:
+    return settings.gis_domain
 
 # Порог «высокого» общего скора для строки «насколько нужен мой сервис».
 # Ниже — бизнес выглядит слабым (риск, что не готов платить), выше — активный.
@@ -31,7 +31,7 @@ def manual_search_links(name: str, city: str | None = None) -> list[str]:
     """
     q_2gis = quote(f"{name} {city}".strip() if city else name, safe="")
     q_ig = quote(name, safe="")
-    url_2gis = f"https://{_GIS_DOMAIN}/search/{q_2gis}"
+    url_2gis = f"https://{_gis_domain()}/search/{q_2gis}"
     url_ig = f"https://www.instagram.com/explore/search/keyword/?q={q_ig}"
     return [
         f'{E.SEARCH} <a href="{url_2gis}">Найти в 2ГИС</a>',

@@ -8,7 +8,6 @@ from aiogram.types import CallbackQuery, Message
 
 from chat_monitor.config_store import (
     ChatMonitorConfig,
-    deserialize_chat_refs,
     parse_chat_refs,
     parse_min_score,
 )
@@ -55,7 +54,7 @@ def _format_chat_monitor_menu(config: ChatMonitorConfig) -> str:
     enabled = "включён" if config.is_enabled else "выключен"
     chat_count = len(config.chats)
     lines = [
-        f"<b>Chat Monitor</b>",
+        "<b>Chat Monitor</b>",
         f"{E.PIN} Статус: {enabled}",
         f"{E.COMMENT} Чатов: {chat_count}",
         f"{E.TARGET} Threshold: {config.min_score:.2f}",

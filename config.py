@@ -11,6 +11,8 @@ LLM-провайдер переключается через .env (LLM_PROVIDER)
 Anthropic остаётся доступным всегда — это настройка, а не необратимая миграция.
 """
 
+from functools import cached_property
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -70,6 +72,37 @@ class Settings(BaseSettings):
     backup_dir: str = "backups"
     backup_keep: int = 14
 
+    # =========================================================================
+    # --- Клиентская конфигурация (Production Template) ---
+    # Все параметры ниже позволяют адаптировать бота под нового клиента
+    # без изменения Python-кода — только через .env.
+    # =========================================================================
+
+    # --- ARCH-3: домен 2ГИС (2gis.kz для Казахстана, 2gis.ru для России) ---
+    gis_domain: str = "2gis.kz"
+
+    # --- ARCH-2: ниша и ключевые слова Chat Monitor ---
+    # Описание ниши для LLM-скоринга (используется в промпте)
+    chat_monitor_niche_description: str = "маникюр/ногтевой сервис"
+    # Описание целевого лида для LLM (кого ищем)
+    chat_monitor_lead_description: str = (
+        "соло-мастер маникюра, который публично упоминает запись клиентов, "
+        "свободные окна, приём на дому или выезд"
+    )
+    # Описание нашего продукта/оффера для LLM
+    chat_monitor_offer_product: str = "сервис записи клиентов через Telegram-бота"
+    # Ключевые слова для первичного фильтра (через запятую).
+    # Пусто = использовать встроенные keywords_nail.py
+    chat_monitor_keywords: str = ""
+
+    # --- ARCH-1: настройки промптов AI-анализа ---
+    # Тип digital-услуг для анализа компании
+    ai_service_type: str = "digital-услуги (сайт, онлайн-запись, SMM, реклама)"
+    # Наш основной оффер (упоминается в анализе если нет онлайн-записи)
+    ai_main_offer: str = "запись через Telegram-бота"
+    # Язык ответов бота (используется в промптах генерации сообщений)
+    ai_response_language: str = "русском"
+
     # --- Производные значения (учитывают legacy-переменные) ---
 
     @property
@@ -107,10 +140,22 @@ class Settings(BaseSettings):
                 chats.append(value)
         return chats
 
-    @property
+    @cached_property
+    def chat_monitor_keywords_list(self) -> tuple[str, ...] | None:
+        """Список ключевых слов из конфига. None = использовать встроенные (ARCH-2)."""
+        if not self.chat_monitor_keywords.strip():
+            return None
+        return tuple(
+            kw.strip()
+            for kw in self.chat_monitor_keywords.split(",")
+            if kw.strip()
+        )
+
+    @cached_property
     def allowed_user_set(self) -> set[int]:
         """Множество разрешённых Telegram user IDs из ALLOWED_USER_IDS.
 
+        Вычисляется один раз при первом обращении (CONFIG-3).
         Пустое множество = доступ не ограничен (личный бот).
         """
         result: set[int] = set()

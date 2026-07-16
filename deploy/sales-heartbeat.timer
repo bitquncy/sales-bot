@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly heartbeat check for Sales Agent Chat Monitor
+Requires=sales-heartbeat.service
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target

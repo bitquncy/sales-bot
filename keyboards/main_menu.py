@@ -93,11 +93,12 @@ def leads_filter_kb() -> InlineKeyboardMarkup:
         rows.append(row)
     rows.append([InlineKeyboardButton(text="Без онлайн-записи", callback_data="leads:no_booking")])
     rows.append([InlineKeyboardButton(text="Chat Monitor", callback_data="leads:chat_monitor")])
+    rows.append([InlineKeyboardButton(text="Экспорт CSV", callback_data="leads:export")])
     rows.append([InlineKeyboardButton(text="↩ В меню", callback_data="menu:main")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def lead_card_kb(lead_id: int, has_analysis: bool) -> InlineKeyboardMarkup:
+def lead_card_kb(lead_id: int, has_analysis: bool, reminder_count: int = 0) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(text="Статус", callback_data=f"st:{lead_id}"),
@@ -107,8 +108,27 @@ def lead_card_kb(lead_id: int, has_analysis: bool) -> InlineKeyboardMarkup:
     ]
     if has_analysis:
         rows.append([InlineKeyboardButton(text="Сообщения для контакта", callback_data=f"gen:{lead_id}")])
-    rows.append([InlineKeyboardButton(text="Напомнить", callback_data=f"rem:{lead_id}")])
+    # Кнопка напоминаний: показывает счётчик если есть активные
+    rem_label = f"Напомнить ({reminder_count})" if reminder_count > 0 else "Напомнить"
+    rows.append([InlineKeyboardButton(text=rem_label, callback_data=f"rem:{lead_id}")])
+    rows.append([InlineKeyboardButton(text="Удалить лид", callback_data=f"del:{lead_id}")])
     rows.append([InlineKeyboardButton(text="↩ К лидам", callback_data="menu:leads")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def reminders_list_kb(lead_id: int, reminders: list) -> InlineKeyboardMarkup:
+    """Клавиатура списка напоминаний с кнопками удаления каждого."""
+    rows = []
+    for r in reminders:
+        date_str = r.remind_at.strftime("%d.%m.%Y %H:%M")
+        rows.append([
+            InlineKeyboardButton(
+                text=f"🗑 {date_str} UTC",
+                callback_data=f"remdel:{r.id}:{lead_id}",
+            )
+        ])
+    rows.append([InlineKeyboardButton(text="+ Добавить напоминание", callback_data=f"rem:{lead_id}")])
+    rows.append([InlineKeyboardButton(text="↩ К лиду", callback_data=f"lead:{lead_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

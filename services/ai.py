@@ -116,11 +116,13 @@ class LLMClient:
 
         has_online_booking: True — есть онлайн-запись; False — нет (или сайта
         нет) -> возможность для оффера; None — определить нельзя.
+        Промпт использует настройки из конфига (ARCH-1).
         """
+        service_type = settings.ai_service_type
+        main_offer = settings.ai_main_offer
         prompt = (
-            "Ты — эксперт по продажам digital-услуг малому бизнесу. "
-            "Проанализируй компанию как потенциального клиента на digital-услуги "
-            "(сайт, онлайн-запись, SMM, реклама).\n\n"
+            f"Ты — эксперт по продажам {service_type} малому бизнесу. "
+            f"Проанализируй компанию как потенциального клиента на {service_type}.\n\n"
             f"{_company_block(name, address, phone, website)}\n\n"
             "Отдельно оцени, есть ли у компании ОНЛАЙН-ЗАПИСЬ. Признаки: виджет/"
             "форма записи на сайте, ссылка «записаться онлайн», интеграции "
@@ -129,8 +131,8 @@ class LLMClient:
             "(has_online_booking=false): это и есть возможность для оффера. Если "
             "сайт есть, но определить по доступным данным нельзя — "
             "has_online_booking=null.\n"
-            "Если онлайн-записи нет (false), в offer ОБЯЗАТЕЛЬНО предложи среди "
-            "прочего «запись через Telegram-бота».\n\n"
+            f"Если онлайн-записи нет (false), в offer ОБЯЗАТЕЛЬНО предложи среди "
+            f"прочего «{main_offer}».\n\n"
             "Ответь СТРОГО одним JSON-объектом без пояснений вокруг:\n"
             '{"score": <int 0-100, потенциал как клиента>, '
             '"weaknesses": ["слабое место 1", ...], '
@@ -161,19 +163,22 @@ class LLMClient:
         if has_online_booking is False:
             if analysis_lines:
                 analysis_lines.append("")
+            main_offer = settings.ai_main_offer
             analysis_lines.append(
-                "💡 Онлайн-записи нет — предложи запись через Telegram-бота (наш оффер)."
+                f"💡 Онлайн-записи нет — предложи {main_offer} (наш оффер)."
             )
         analysis = "\n".join(analysis_lines).strip() or "Анализ без деталей."
         return score, analysis, has_online_booking
 
     async def generate_messages(self, name: str, analysis: str) -> tuple[str, str]:
+        service_type = settings.ai_service_type
+        language = settings.ai_response_language
         prompt = (
-            "Ты — специалист по холодным продажам digital-услуг. "
+            f"Ты — специалист по холодным продажам {service_type}. "
             f'Компания: "{name}".\n'
             f"Результат анализа:\n{analysis}\n\n"
-            "Напиши 2 варианта первого сообщения владельцу этой компании "
-            "(вежливо, по-русски, без спама и давления, с конкретной пользой):\n"
+            f"Напиши 2 варианта первого сообщения владельцу этой компании "
+            f"(вежливо, на {language}, без спама и давления, с конкретной пользой):\n"
             "1) короткое — 2-3 предложения;\n"
             "2) развёрнутое — 5-8 предложений.\n\n"
             "Ответь СТРОГО одним JSON-объектом без пояснений вокруг:\n"
@@ -188,6 +193,10 @@ class LLMClient:
             raise AIError("LLM returned empty message variants")
         return short, long
 
+    # Максимальная длина текста сообщения, передаваемого в LLM (SEC-2).
+    # Ограничивает стоимость вызова и предотвращает превышение контекстного окна.
+    _MAX_CHAT_MESSAGE_LEN = 2000
+
     async def score_nail_chat_message(
         self,
         message_text: str,
@@ -195,6 +204,9 @@ class LLMClient:
         source_chat: str | None = None,
     ) -> tuple[float, str, bool]:
         """Возвращает (score 0.0-1.0, reasoning, is_solo_master) для nail-чата."""
+        # Обрезаем до лимита перед вставкой в промпт (SEC-2)
+        truncated_text = message_text[: self._MAX_CHAT_MESSAGE_LEN]
+
         context = []
         if source_chat:
             context.append(f"Чат: {source_chat}")
@@ -202,18 +214,20 @@ class LLMClient:
             context.append(f"Автор: @{username.lstrip('@')}")
         context_block = "\n".join(context) or "Контекст чата не указан"
 
+        niche = settings.chat_monitor_niche_description
+        lead_desc = settings.chat_monitor_lead_description
+        offer = settings.chat_monitor_offer_product
         prompt = (
-            "Ты оцениваешь Telegram-сообщение как sales-lead для сервиса записи "
-            "клиентов через Telegram-бота. Ниша: маникюр/ногтевой сервис.\n\n"
-            "Нужно определить, пишет ли автор КАК соло-мастер маникюра, который "
-            "публично упоминает запись клиентов, свободные окна, приём на дому "
-            "или выезд. Высокий score ставь, если по сообщению видно, что автор "
+            f"Ты оцениваешь Telegram-сообщение как sales-lead для {offer}. "
+            f"Ниша: {niche}.\n\n"
+            f"Нужно определить, пишет ли автор КАК {lead_desc}. "
+            "Высокий score ставь, если по сообщению видно, что автор "
             "сам принимает клиентов и может нуждаться в нормальной системе записи.\n"
             "Score 0 ставь, если это клиент ищет мастера, салон/сеть с готовой "
             "CRM, вакансия, обсуждение без оффера записи или нерелевантная услуга.\n\n"
             f"{context_block}\n\n"
             "Сообщение:\n"
-            f"{message_text}\n\n"
+            f"{truncated_text}\n\n"
             "Ответь СТРОГО одним JSON-объектом без пояснений вокруг:\n"
             '{"score": <float 0-1>, "reasoning": "краткое пояснение", '
             '"is_solo_master": <true|false>}'
@@ -328,13 +342,34 @@ class OpenAICompatClient(LLMClient):
 
 
 def get_client() -> LLMClient:
-    """Создаёт клиента для провайдера из настроек (settings.llm_provider)."""
-    provider = (settings.llm_provider or "anthropic").lower()
-    if provider == "anthropic":
-        return AnthropicClient()
-    if provider in ("openrouter", "openai", "moonshot", "openai_compat"):
-        return OpenAICompatClient()
-    raise AIError(f"Unknown LLM provider: {settings.llm_provider!r}")
+    """Возвращает синглтон LLM-клиента для провайдера из настроек (ARCH-5).
+
+    Клиент создаётся один раз при первом вызове и переиспользуется —
+    нет накладных расходов на инициализацию HTTP connection pool при каждом вызове.
+    """
+    return _get_or_create_client()
+
+
+_llm_client_instance: LLMClient | None = None
+
+
+def _get_or_create_client() -> LLMClient:
+    global _llm_client_instance  # noqa: PLW0603
+    if _llm_client_instance is None:
+        provider = (settings.llm_provider or "anthropic").lower()
+        if provider == "anthropic":
+            _llm_client_instance = AnthropicClient()
+        elif provider in ("openrouter", "openai", "moonshot", "openai_compat"):
+            _llm_client_instance = OpenAICompatClient()
+        else:
+            raise AIError(f"Unknown LLM provider: {settings.llm_provider!r}")
+    return _llm_client_instance
+
+
+def reset_client() -> None:
+    """Сбрасывает синглтон. Используется в тестах для изоляции."""
+    global _llm_client_instance  # noqa: PLW0603
+    _llm_client_instance = None
 
 
 def _resolve_client(client) -> LLMClient:

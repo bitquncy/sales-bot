@@ -13,6 +13,7 @@ from db.base import init_db, session_factory
 from handlers import analysis, chat_monitor, common, crm, menu, messages, search, start
 from services.reminders import reminders_loop
 from utils.access import AllowlistMiddleware
+from utils.config_validator import validate_config
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,17 +46,12 @@ def _check_runtime_env() -> None:
 
 async def main() -> None:
     _check_runtime_env()
-    if not settings.bot_token:
-        logger.error(
-            "BOT_TOKEN не задан. Скопируй .env.example в .env и впиши токен от @BotFather."
-        )
+    # CONFIG-2: полная валидация конфига перед стартом
+    errors = validate_config(settings)
+    if errors:
+        for err in errors:
+            logger.error("Config error: %s", err)
         sys.exit(1)
-    if not settings.llm_ready:
-        logger.warning(
-            "Ключ LLM-провайдера (%s) не задан — AI-анализ и генерация сообщений "
-            "работать не будут. Заполни LLM_API_KEY (или ANTHROPIC_API_KEY) в .env.",
-            settings.llm_provider,
-        )
 
     await init_db()
 

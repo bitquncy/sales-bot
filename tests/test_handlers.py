@@ -272,7 +272,7 @@ async def test_leads_filter_no_booking_shows_only_false(session_factory):
         await repo.save_lead_analysis(session, a.id, USER, 50, "x", has_online_booking=False)
         b = await repo.create_lead(session, USER, "СЗаписью")
         await repo.save_lead_analysis(session, b.id, USER, 50, "x", has_online_booking=True)
-        c = await repo.create_lead(session, USER, "НеАнализировали")  # has_online_booking=None
+        await repo.create_lead(session, USER, "НеАнализировали")  # has_online_booking=None
 
     cb = FakeCallback("leads:no_booking", USER)
     await h_crm.list_leads_filtered(cb)

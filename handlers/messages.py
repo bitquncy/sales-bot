@@ -14,7 +14,7 @@ from aiogram.types import CallbackQuery, Message
 from config import settings
 from db import repo
 from db.base import session_factory
-from keyboards.main_menu import lead_card_kb, messages_kb
+from keyboards.main_menu import messages_kb
 from services.ai import AIError, AIOverloadError, AIRateLimitError, generate_messages
 from states.fsm import EditMessageFSM
 from utils.emoji_config import E, P
