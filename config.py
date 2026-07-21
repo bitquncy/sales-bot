@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     bot_token: str = ""
+    port: int = 0
 
     # --- SEC-FIX-6: Окружение (development / production) ---
     # В production пустой ALLOWED_USER_IDS становится ОШИБКОЙ запуска (fail-closed):

@@ -5,6 +5,7 @@ run() над ним.
 """
 
 import pytest
+from aiohttp import web
 
 import bot
 
@@ -84,6 +85,32 @@ def test_ensure_session_path_ready_creates_parent(tmp_path, monkeypatch):
     assert target.parent.exists()
 
 
+def test_ensure_session_path_ready_falls_back_to_tmp(monkeypatch):
+    from chat_monitor import runner
+
+    monkeypatch.setattr(runner.settings, "chat_monitor_session_path", "/app/session/chat_monitor.session")
+
+    real_mkdir = runner.Path.mkdir
+    blocked_parent = str(runner.Path("/app/session"))
+    real_is_absolute = runner.Path.is_absolute
+
+    def fake_mkdir(self, *args, **kwargs):
+        if str(self) == blocked_parent:
+            raise PermissionError("readonly")
+        return real_mkdir(self, *args, **kwargs)
+
+    def fake_is_absolute(self):
+        if str(self) == str(runner.Path("/app/session/chat_monitor.session")):
+            return True
+        return real_is_absolute(self)
+
+    monkeypatch.setattr(runner.Path, "mkdir", fake_mkdir)
+    monkeypatch.setattr(runner.Path, "is_absolute", fake_is_absolute)
+    runner.ensure_session_path_ready()
+    assert runner.Path(runner.settings.chat_monitor_session_path).name == "chat_monitor.session"
+    assert "tmp" in {part.lower() for part in runner.Path(runner.settings.chat_monitor_session_path).parts}
+
+
 def _closing_run(exc):
     """Фейковый asyncio.run: закрывает корутину (без warning) и бросает exc."""
     def _fake(coro):
@@ -108,3 +135,45 @@ def test_run_propagates_nonzero_systemexit(monkeypatch):
     with pytest.raises(SystemExit) as exc_info:
         bot.run()
     assert exc_info.value.code == 1
+
+
+@pytest.mark.asyncio
+async def test_start_health_server_disabled(monkeypatch):
+    monkeypatch.setattr(bot.settings, "port", 0)
+    assert await bot._start_health_server() is None
+
+
+@pytest.mark.asyncio
+async def test_start_health_server_enabled(monkeypatch):
+    started = {}
+
+    class FakeSite:
+        def __init__(self, runner, host, port):
+            started["host"] = host
+            started["port"] = port
+
+        async def start(self):
+            started["started"] = True
+
+    class FakeRunner:
+        def __init__(self, app):
+            assert isinstance(app, web.Application)
+
+        async def setup(self):
+            started["setup"] = True
+
+        async def cleanup(self):
+            started["cleanup"] = True
+
+    monkeypatch.setattr(bot.settings, "port", 9999)
+    monkeypatch.setattr(bot.web, "AppRunner", FakeRunner)
+    monkeypatch.setattr(bot.web, "TCPSite", FakeSite)
+
+    runner, _site = await bot._start_health_server()
+    assert started == {
+        "setup": True,
+        "host": "0.0.0.0",
+        "port": 9999,
+        "started": True,
+    }
+    await runner.cleanup()

@@ -19,12 +19,28 @@ logger = logging.getLogger(__name__)
 def ensure_session_path_ready() -> None:
     """Ensure the Telethon session parent directory exists and is writable."""
     session_path = Path(settings.chat_monitor_session_path)
-    parent = session_path.parent
-    if str(parent) not in ("", "."):
-        parent.mkdir(parents=True, exist_ok=True)
-    probe = parent if str(parent) not in ("", ".") else Path.cwd()
-    if not probe.exists() or not probe.is_dir():
-        raise RuntimeError(f"Chat monitor session directory is unavailable: {probe}")
+    candidates = [session_path]
+
+    # Render/Web platforms often have a writable /tmp but not a dedicated /app/session volume.
+    if session_path.is_absolute() and "tmp" not in {part.lower() for part in session_path.parts}:
+        candidates.append(Path("/tmp") / session_path.name)
+
+    last_error: Exception | None = None
+    for candidate in candidates:
+        try:
+            parent = candidate.parent
+            if str(parent) not in ("", "."):
+                parent.mkdir(parents=True, exist_ok=True)
+            probe = parent if str(parent) not in ("", ".") else Path.cwd()
+            if not probe.exists() or not probe.is_dir():
+                raise RuntimeError(f"Chat monitor session directory is unavailable: {probe}")
+            settings.chat_monitor_session_path = str(candidate)
+            return
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError(
+        f"Chat monitor session path is not writable: {settings.chat_monitor_session_path}"
+    ) from last_error
 
 
 def _ensure_ready() -> None:

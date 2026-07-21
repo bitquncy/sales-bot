@@ -4,6 +4,7 @@ import asyncio
 import logging
 import sys
 
+from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -29,6 +30,24 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+async def _start_health_server() -> tuple[web.AppRunner, web.BaseSite] | None:
+    if settings.port <= 0:
+        return None
+
+    async def health(_request: web.Request) -> web.Response:
+        return web.json_response({"ok": True})
+
+    app = web.Application()
+    app.router.add_get("/", health)
+    app.router.add_get("/healthz", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host="0.0.0.0", port=settings.port)
+    await site.start()
+    logger.info("Health server listening on port %s", settings.port)
+    return runner, site
 
 
 def _check_runtime_env() -> None:
@@ -130,6 +149,8 @@ async def main() -> None:
         common.fallback_router,
     )
 
+    health_server = await _start_health_server()
+
     # Запуск фоновых задач
     background_tasks: list[tuple[str, asyncio.Task, bool]] = []
     
@@ -215,7 +236,11 @@ async def main() -> None:
                 logger.error("%s shutdown error: %s", name, exc)
         
         await bot.session.close()
-        
+
+        if health_server is not None:
+            runner, _site = health_server
+            await runner.cleanup()
+         
         if storage and hasattr(storage, 'close'):
             logger.info("Closing FSM storage...")
             await storage.close()
