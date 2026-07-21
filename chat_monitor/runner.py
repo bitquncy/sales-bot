@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from pathlib import Path
 
 from config import settings
 from chat_monitor.config_store import ChatMonitorConfig, normalize_chat_ref
@@ -13,6 +14,17 @@ from utils.file_perms import restrict_file_permissions
 from utils.sentry import capture_exception
 
 logger = logging.getLogger(__name__)
+
+
+def ensure_session_path_ready() -> None:
+    """Ensure the Telethon session parent directory exists and is writable."""
+    session_path = Path(settings.chat_monitor_session_path)
+    parent = session_path.parent
+    if str(parent) not in ("", "."):
+        parent.mkdir(parents=True, exist_ok=True)
+    probe = parent if str(parent) not in ("", ".") else Path.cwd()
+    if not probe.exists() or not probe.is_dir():
+        raise RuntimeError(f"Chat monitor session directory is unavailable: {probe}")
 
 
 def _ensure_ready() -> None:
@@ -110,6 +122,7 @@ async def run_chat_monitor(bot, session_factory_arg) -> None:
         session_factory_arg: SQLAlchemy session factory (заменяет глобальный)
     """
     _ensure_ready()
+    ensure_session_path_ready()
     # SEC-FIX-1: session-файл — rootkey к аккаунту Telegram, только владельцу ОС
     restrict_file_permissions(settings.chat_monitor_session_path)
     try:
@@ -249,6 +262,7 @@ async def run() -> None:
             "Standalone Chat Monitor is disabled in production; run it embedded in bot.py"
         )
     _ensure_ready()
+    ensure_session_path_ready()
     # SEC-FIX-1: session-файл — rootkey к аккаунту Telegram, только владельцу ОС
     restrict_file_permissions(settings.chat_monitor_session_path)
     try:

@@ -131,19 +131,19 @@ async def main() -> None:
     )
 
     # Запуск фоновых задач
-    background_tasks = []
+    background_tasks: list[tuple[str, asyncio.Task, bool]] = []
     
     # Фоновый поллер напоминаний (всегда активен)
     reminders_task = asyncio.create_task(
         reminders_loop(bot, session_factory, settings.reminders_poll_interval)
     )
-    background_tasks.append(("reminders", reminders_task))
+    background_tasks.append(("reminders", reminders_task, True))
 
     # SEC-FIX-4: фоновая очистка устаревших ПДн и журналов (retention)
     retention_task = asyncio.create_task(
         retention_loop(session_factory, settings.retention_cleanup_interval_seconds)
     )
-    background_tasks.append(("retention", retention_task))
+    background_tasks.append(("retention", retention_task, True))
     
     # Chat Monitor (опционально, если настроен в .env)
     if settings.chat_monitor_ready:
@@ -155,7 +155,7 @@ async def main() -> None:
             chat_monitor_task = asyncio.create_task(
                 run_chat_monitor(bot, session_factory)
             )
-            background_tasks.append(("chat_monitor", chat_monitor_task))
+            background_tasks.append(("chat_monitor", chat_monitor_task, False))
             logger.info("Chat Monitor: started successfully")
         except ImportError as exc:
             logger.warning("Chat Monitor: Telethon not installed (%s), skipping", exc)
@@ -165,32 +165,46 @@ async def main() -> None:
         logger.info("Chat Monitor: not configured (set CHAT_MONITOR_* in .env to enable)")
     
     logger.info("Bot started (polling)")
-    logger.info("Background tasks: %s", ", ".join(name for name, _ in background_tasks))
+    logger.info("Background tasks: %s", ", ".join(name for name, _, _ in background_tasks))
     
     polling_task = asyncio.create_task(dp.start_polling(bot), name="telegram-polling")
-    watched_tasks = [task for _, task in background_tasks]
+    watched_tasks = [task for _, task, _ in background_tasks]
     try:
-        done, _pending = await asyncio.wait(
-            [polling_task, *watched_tasks],
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if polling_task not in done:
-            failed = next(iter(done))
-            if failed.cancelled():
-                raise RuntimeError(f"Background task stopped unexpectedly: {failed.get_name()}")
-            exc = failed.exception()
-            if exc is None:
-                exc = RuntimeError(f"Background task exited unexpectedly: {failed.get_name()}")
-            capture_exception(exc)
-            raise exc
-        await polling_task
+        task_meta = {task: (name, critical) for name, task, critical in background_tasks}
+        while True:
+            done, _pending = await asyncio.wait(
+                [polling_task, *watched_tasks],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if polling_task in done:
+                await polling_task
+                break
+            for failed in done:
+                name, critical = task_meta[failed]
+                if failed.cancelled():
+                    if critical:
+                        raise RuntimeError(f"Critical background task stopped unexpectedly: {name}")
+                    logger.warning("Optional background task stopped: %s", name)
+                    watched_tasks = [task for task in watched_tasks if task is not failed]
+                    continue
+                exc = failed.exception()
+                if exc is None:
+                    exc = RuntimeError(f"Background task exited unexpectedly: {name}")
+                capture_exception(exc)
+                if critical:
+                    raise exc
+                logger.error("Optional background task failed (%s): %s", name, exc)
+                watched_tasks = [task for task in watched_tasks if task is not failed]
+            if not watched_tasks:
+                await polling_task
+                break
     finally:
         logger.info("Shutting down bot...")
         if not polling_task.done():
             polling_task.cancel()
         
         # Graceful shutdown: отменяем все фоновые задачи и ждем их завершения
-        for name, task in background_tasks:
+        for name, task, _critical in background_tasks:
             logger.info("Stopping %s...", name)
             task.cancel()
             try:
