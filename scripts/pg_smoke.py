@@ -74,10 +74,14 @@ async def run_smoke() -> None:
             )
             assert reminder.id is not None
 
-            # LLM budget (транзакция read-then-write — на PG должна работать)
-            allowed, count = await repo.check_llm_budget(session, daily_limit=10)
+            # LLM budget uses its own transaction. Use a fresh session because
+            # SQLAlchemy may have an autobegun read transaction after refresh/
+            # SELECT operations in the CRUD smoke flow.
+        async with factory() as budget_session:
+            allowed, count = await repo.check_llm_budget(budget_session, daily_limit=10)
             assert allowed and count == 1
 
+        async with factory() as session:
             # Аудит-лог (миграция 0003 / create_all)
             await repo.log_action(session, owner, "pg_smoke", lead.id, details="smoke")
 
