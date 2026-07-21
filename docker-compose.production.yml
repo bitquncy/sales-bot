@@ -1,0 +1,32 @@
+services:
+  bot:
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      ENVIRONMENT: production
+      DB_URL: ${DB_URL:?Set DB_URL to PostgreSQL URL in .env}
+      REDIS_URL: ${REDIS_URL:?Set REDIS_URL in .env}
+      AUTO_CREATE_SCHEMA: "false"
+
+  migrate:
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: production
+      DB_URL: ${DB_URL:?Set DB_URL to PostgreSQL URL in .env}
+      AUTO_CREATE_SCHEMA: "false"
+
+  backup:
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: production
+      DB_URL: ${DB_URL:?Set DB_URL to PostgreSQL URL in .env}
+      BACKUP_ENCRYPTION_KEY: ${BACKUP_ENCRYPTION_KEY:?Set BACKUP_ENCRYPTION_KEY in .env}

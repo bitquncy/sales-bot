@@ -1,0 +1,78 @@
+# Version control
+.git
+.gitignore
+.claude/
+.kimchi/
+
+# Python cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info
+dist/
+build/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Tests and dev tools
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Dev dependencies
+requirements-dev.txt
+
+# Internal documentation (не для клиентов)
+PROJECT_CONTEXT.txt
+*.zip
+*.md
+!README.md
+
+# Scripts not needed in container
+scripts/live_walkthrough.py
+scripts/telethon_qr_login.py
+
+# Deploy configs (не нужны внутри контейнера)
+deploy/
+
+# Secrets (КРИТИЧНО: никогда не запекать в образ)
+# .env содержит BOT_TOKEN, API-ключи и др. — в контейнер попадает через env_file в docker-compose.yml
+.env
+.env.*
+!.env.example
+# Telethon-сессия — по сути ключ от аккаунта
+*.session
+*.session-journal
+chat_monitor.session*
+*.journal
+*.heartbeat
+# Локальная SQLite-БД (данные монтируются как том, см. ниже)
+sales_agent.db
+*.db
+
+# Runtime data (монтируется как том)
+*.db
+*.session
+*.heartbeat
+backups/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# GitHub Actions
+.github/

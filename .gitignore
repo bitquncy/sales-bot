@@ -1,0 +1,54 @@
+# Виртуальные окружения
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Секреты и локальная конфигурация
+.env
+.env.*
+!.env.example
+
+# База данных SQLite
+*.db
+*.sqlite
+*.sqlite3
+*.session
+*.session-journal
+*.db-wal
+*.db-shm
+chat_monitor_qr.png
+
+# Архивы могут обходить ignore-правила и содержать .env/session/DB
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.tgz
+
+# Heartbeat-файл Chat Monitor
+chat_monitor.heartbeat
+
+# Бэкапы БД
+backups/
+
+# Покрытие тестами
+.coverage
+.coverage.*
+htmlcov/
+
+# IDE / ОС
+.idea/
+.vscode/
+.claude/
+.kimchi/
+.DS_Store
+Thumbs.db

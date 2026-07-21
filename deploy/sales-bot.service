@@ -1,0 +1,23 @@
+[Unit]
+Description=Sales Agent Bot (aiogram)
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+UMask=0077
+WorkingDirectory=/path/to/sales_agent_bot
+ExecStart=/path/to/sales_agent_bot/venv/bin/python bot.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sales-bot
+
+# Переменные окружения берутся из .env через pydantic-settings
+# Если хочешь задать их явно — раскомментируй:
+# EnvironmentFile=/path/to/sales_agent_bot/.env
+
+[Install]
+WantedBy=multi-user.target

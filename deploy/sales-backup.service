@@ -1,0 +1,12 @@
+[Unit]
+Description=Sales Agent DB Backup (one-shot)
+After=network.target
+
+[Service]
+Type=oneshot
+User=YOUR_USER
+WorkingDirectory=/path/to/sales_agent_bot
+ExecStart=/path/to/sales_agent_bot/venv/bin/python -m scripts.backup_db
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sales-backup

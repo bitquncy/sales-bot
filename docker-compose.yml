@@ -1,0 +1,88 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - bot_data:/app/data
+      - session_data:/app/session
+      - backup_data:/app/backups
+    environment:
+      DB_URL: ${DB_URL:-sqlite+aiosqlite:////app/data/sales_agent.db}
+      CHAT_MONITOR_SESSION_PATH: /app/session/chat_monitor.session
+      HEARTBEAT_FILE: /app/data/chat_monitor.heartbeat
+      BACKUP_DIR: /app/backups
+    # Healthcheck: проверяем, что Bot API getMe отвечает (бот жив и может общаться с Telegram)
+    # Использует scripts/healthcheck.py (только stdlib — http.client, json)
+    healthcheck:
+      test: ["CMD", "python", "/app/scripts/healthcheck.py"]
+      interval: 60s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    # Примечание: Chat Monitor автоматически запускается внутри бота (если настроен в .env)
+    # Не требуется отдельный сервис
+
+  backup:
+    build: .
+    env_file: .env
+    volumes:
+      - bot_data:/app/data
+      - backup_data:/app/backups
+    environment:
+      DB_URL: ${DB_URL:-sqlite+aiosqlite:////app/data/sales_agent.db}
+      BACKUP_DIR: /app/backups
+    command: ["python", "-m", "scripts.backup_db"]
+    profiles: ["backup"]
+
+  migrate:
+    build: .
+    env_file: .env
+    environment:
+      DB_URL: ${DB_URL:-sqlite+aiosqlite:////app/data/sales_agent.db}
+    command: ["alembic", "upgrade", "head"]
+    profiles: ["postgres"]
+
+  # --- PostgreSQL (required for ENVIRONMENT=production) ---
+  # Запуск: docker compose --profile postgres up -d postgres
+  # Затем в .env: DB_URL=postgresql+asyncpg://sales_agent:${POSTGRES_PASSWORD}@postgres:5432/sales_agent
+  # Бэкап PG: docker compose exec postgres pg_dump -U sales_agent sales_agent > backup.sql
+  # (или scripts/backup_db.py — вызывает pg_dump автоматически при postgresql:// DB_URL)
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: sales_agent
+      POSTGRES_USER: sales_agent
+      # Пароль — только через .env, без дефолта в репозитории
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sales_agent -d sales_agent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    profiles: ["postgres"]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$${REDIS_PASSWORD}\""]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    profiles: ["postgres"]
+
+volumes:
+  bot_data:
+  session_data:
+  backup_data:
+  pg_data:
+  redis_data:

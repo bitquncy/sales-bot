@@ -1,0 +1,8 @@
+# Dev/test зависимости. Не устанавливать в production.
+# Установка: pip install -r requirements-lock.txt -r requirements-dev.txt
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-cov==7.1.0
+ruff==0.11.13
+mypy==1.16.0
+pip-audit==2.9.0

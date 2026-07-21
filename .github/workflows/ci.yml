@@ -1,0 +1,107 @@
+name: CI
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+            requirements-lock.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-lock.txt -r requirements-dev.txt
+
+      - name: Reject tracked secrets, sessions, DBs and archives
+        run: python -m scripts.check_tracked_secrets
+
+      - name: Audit Python dependencies
+        run: pip-audit -r requirements-lock.txt
+
+      # ruff есть в requirements-dev.txt. Конфига в проекте нет — дефолтные правила.
+      # alembic/ исключён: его env.py и миграции используют sys.path-хаки (E402),
+      # это стандартный паттерн Alembic, а не ошибка. Остальной код чист (проверено локально).
+      - name: Lint (ruff)
+        run: ruff check . --exclude alembic
+
+      # mypy есть в requirements-dev.txt, но конфига нет и кодовая база
+      # ещё не приведена к чистой типизации — шаг информационный, не блокирует CI.
+      # TODO: убрать continue-on-error после добавления mypy-конфига и разбора ошибок.
+      - name: Type check (mypy, non-blocking)
+        continue-on-error: true
+        run: mypy . --ignore-missing-imports --exclude '(alembic|tests|venv)/'
+
+      # pytest строгий: падение тестов = красный CI.
+      # pytest.ini: asyncio_mode = auto, testpaths = tests — достаточно просто "pytest".
+      # Coverage информационный (term-missing), порог не задан: текущее покрытие
+      # ещё не дотягивает до разумного fail-under — TODO после роста покрытия.
+      - name: Tests (pytest + coverage)
+        run: pytest -v --cov=. --cov-report=term-missing
+
+  # Проверка PostgreSQL-совместимости: схема (init_db) и базовые CRUD-операции
+  # должны работать на PG так же, как на SQLite. Ловит диалект-специфичные
+  # регрессии (PRAGMA, частичные индексы, boolean defaults).
+  postgres-compat:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: sales_agent_test
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_pass
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U test_user -d sales_agent_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+            requirements-lock.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-lock.txt
+
+      - name: Apply Alembic migrations
+        env:
+          DB_URL: postgresql+asyncpg://test_user:test_pass@localhost:5432/sales_agent_test
+        run: alembic upgrade head
+
+      - name: PostgreSQL smoke test (schema verify + CRUD)
+        env:
+          DB_URL: postgresql+asyncpg://test_user:test_pass@localhost:5432/sales_agent_test
+          AUTO_CREATE_SCHEMA: "false"
+        run: python -m scripts.pg_smoke

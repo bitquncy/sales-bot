@@ -1,0 +1,12 @@
+[Unit]
+Description=Sales Agent Heartbeat Check (one-shot)
+After=network.target
+
+[Service]
+Type=oneshot
+User=YOUR_USER
+WorkingDirectory=/path/to/sales_agent_bot
+ExecStart=/path/to/sales_agent_bot/venv/bin/python -m scripts.check_heartbeat --stale-minutes 30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sales-heartbeat

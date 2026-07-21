@@ -1,0 +1,1333 @@
+================================================================================
+                              PROJECT_CONTEXT.txt
+            Полная документация проекта для передачи другому ИИ
+================================================================================
+
+Этот файл описывает проект AI Sales Agent — личный Telegram-бот для поиска
+потенциальных бизнес-клиентов, их AI-анализа, генерации сообщений для
+холодного контакта и управления CRM-лайт с напоминаниями. Файл написан на
+основе полного изучения исходного кода и является единственным источником
+контекста, достаточным для глубокого аудита без необходимости читать весь код.
+
+================================================================================
+1. ОБЩАЯ ИНФОРМАЦИЯ
+================================================================================
+
+Название проекта
+  AI Sales Agent — личный Telegram-бот (sales_agent_bot).
+
+Цель проекта
+  Автоматизировать процесс холодных продаж digital-услуг малому бизнесу:
+  найти потенциальных клиентов, проанализировать их потенциал с помощью
+  AI, подготовить первое сообщение для контакта, управлять воронкой лидов
+  (статусы, заметки, напоминания) и пассивно собирать лиды из открытых
+  Telegram-чатов.
+
+Какую проблему решает
+  Ручной поиск клиентов по городам медленный и бессистемный. AI Sales Agent
+  берёт данные из OpenStreetMap (бесплатно, без ключей), даёт пользователю
+  карточки компаний по категориям, анализирует каждую через LLM на предмет
+  слабых мест и наличия онлайн-записи, генерирует персонализированные
+  сообщения и хранит всё в простой CRM прямо в Telegram. Дополнительно —
+  пассивный мониторинг открытых Telegram-чатов (пока только nail-ниша):
+  Telethon слушает новые сообщения, фильтрует по ключевым словам и LLM-
+  скорит, сохраняя релевантные как лиды в ту же CRM.
+
+Кто целевая аудитория
+  Один пользователь-продавец (фрилансер digital-услуг или агент). Бот —
+  личный: данные скоупятся по owner_tg_id (Telegram user id владельца).
+  Многопользовательская модель не заложена, но архитектурно не запрещена —
+  каждый пользователь видит только свои лиды и напоминания.
+
+Основные сценарии использования
+  1. Поиск компаний в городе по категории (барбершопы, кафе, стоматологии
+     и т.д.) через OpenStreetMap Overpass API.
+  2. AI-анализ найденной компании: оценка 0-100, слабые места, наличие
+     онлайн-записи, что предложить (с приоритетом на «запись через
+     Telegram-бота» если онлайн-записи нет).
+  3. Генерация двух вариантов холодного сообщения (короткое 2-3 предложения
+     и развёрнутое 5-8 предложений) с возможностью ручного редактирования.
+  4. CRM-лайт: сохранение лидов, фильтрация по статусу, смена статусов,
+     заметки, фильтр «без онлайн-записи» (приоритетные), фильтр по источнику
+     (OSM или Chat Monitor).
+  5. Напоминания: быстрые (1/3/7/14 дней) или своя дата (ДД.ММ.ГГГГ ЧЧ:ММ),
+     фоновый поллер отправляет их в нужное время.
+  6. Chat Lead Monitor: пассивный сбор лидов из открытых Telegram-чатов
+     (nail-ниша), настройка чатов и порога скоринга через бота.
+
+
+================================================================================
+2. АРХИТЕКТУРА
+================================================================================
+
+Структура проекта
+  bot.py              — точка входа: создаёт Bot/Dispatcher, регистрирует
+                        роутеры, запускает polling и фоновый поллер
+                        напоминаний.
+  config.py           — конфигурация через pydantic-settings из .env.
+  db/
+    base.py           — async SQLAlchemy engine, sessionmaker, init_db()
+                        (create_all + лёгкая миграция ALTER TABLE).
+    models.py         — ORM-модели: User, Lead, Reminder, ChatMonitorSettings.
+                        Enum LeadStatus, STATUS_LABELS, валидация статусов.
+    repo.py            — CRUD-операции (все скоупятся по owner_tg_id).
+    __init__.py        — пустой.
+  handlers/
+    start.py           — /start: регистрация пользователя, главное меню.
+    common.py          — /help, /cancel, fallback-хендлеры (commands_router,
+                        fallback_router — два отдельных Router).
+    search.py          — FSM-поиск: город -> категория -> карточки с пагинацией.
+    analysis.py        — AI-анализ компании (из поиска и из карточки лида).
+    messages.py        — генерация сообщений + редактирование.
+    crm.py             — список лидов, фильтры, статусы, заметки, напоминания.
+    menu.py            — главное меню, настройки (заглушка).
+    chat_monitor.py    — настройки Chat Monitor через кнопки бота.
+    company.py         — форматирование карточек компании/лида, ссылки на
+                        2ГИС и Instagram, строка «насколько нужен мой сервис».
+    __init__.py        — пустой.
+  services/
+    ai.py              — LLM-провайдер (Anthropic + OpenAI-совместимый),
+                        анализ, генерация, скоринг nail-чата.
+    places.py          — клиент OpenStreetMap Overpass API (поиск компаний).
+    reminders.py       — фоновый поллер напоминаний.
+    __init__.py         — пустой.
+  chat_monitor/
+    processor.py       — обработка сообщений: фильтр -> LLM-скоринг -> сохранение.
+    filtering.py       — keyword-фильтр (без сети/LLM).
+    keywords_nail.py   — ключевые слова nail-ниши (расширяемый список).
+    config_store.py    — хранение/нормализация настроек Chat Monitor
+                        (ChatMonitorConfig, сериализация chat refs).
+    runner.py          — CLI-запуск Telethon userbot (отдельный процесс).
+    __init__.py        — пустой.
+  keyboards/
+    main_menu.py       — все inline-клавиатуры бота.
+    __init__.py        — пустой.
+  states/
+    fsm.py             — FSM-состояния: SearchFSM, NoteFSM, EditMessageFSM,
+                        ReminderFSM, ChatMonitorFSM.
+    __init__.py        — пустой.
+  utils/
+    emoji_config.py    — маппинг Unicode-эмодзи на кастомные Telegram emoji-id,
+                        класс E (HTML для текстов), класс P (plain для alert).
+    safe_send.py       — safe_answer/safe_edit/safe_bot_send с авто-fallback
+                        на plain-эмодзи и обрезкой по лимиту Telegram (4096).
+    __init__.py        — пустой.
+  scripts/
+    live_walkthrough.py — живой (не моковый) прогон всех функций бота.
+    smoke_llm.py        — проверка LLM-провайдера одним реальным вызовом.
+    telethon_qr_login.py — QR-авторизация Telethon-сессии без SMS.
+  tests/
+    conftest.py         — фикстуры: in-memory SQLite, session_factory, session.
+    fakes.py            — FakeMessage, FakeCallback, FakeState, FakeUser
+                          для прямого вызова хендлеров без живого Telegram.
+    test_ai.py          — тесты AI-анализа (мок Anthropic).
+    test_ai_provider.py — тесты переключаемого LLM-провайдера.
+    test_bot.py         — тесты точки входа (Ctrl+C, SystemExit).
+    test_chat_monitor.py — тесты Chat Lead Monitor.
+    test_chat_monitor_settings.py — тесты настроек Chat Monitor через бот.
+    test_crm.py         — тесты CRM: статусы, карточки, парсинг даты.
+    test_emoji.py       — тесты emoji_config и safe_send fallback.
+    test_fixes.py       — регрессии по QA-фиксам.
+    test_handlers.py    — тесты хендлеров (поиск, анализ, CRM, сообщения).
+    test_keyboards.py   — структурные тесты клавиатур.
+    test_messages.py    — тесты генератора сообщений и HTML-экранирования.
+    test_places.py      — тесты клиента Overpass API (мок aiohttp).
+    test_reminders.py   — тесты фонового поллера напоминаний.
+    test_repo.py        — тесты CRUD-слоя.
+  config-файлы:
+    .env / .env.example — переменные окружения.
+    requirements.txt    — верхнеуровневые пакеты (для чтения/обновления).
+    requirements-lock.txt — полный lock всего дерева (для установки в prod).
+    pytest.ini          — asyncio_mode=auto, testpaths=tests.
+    run.bat / run.sh    — лаунчеры (активируют venv, запускают bot.py).
+    README.md           — документация для пользователя/разработчика.
+
+Назначение директорий
+  db/        — слой данных: модели, engine, CRUD.
+  handlers/  — aiogram-роутеры (бизнес-логика пользовательских сценариев).
+  services/  — внешние интеграции: LLM, Overpass API, поллер напоминаний.
+  chat_monitor/ — отдельный модуль Telethon userbot (запускается своим процессом).
+  keyboards/ — inline-клавиатуры (без бизнес-логики, чисто UI).
+  states/    — FSM-состояния (декларация, без логики).
+  utils/     — утилиты: эмодзи, безопасная отправка.
+  scripts/   — вспомогательные скрипты (не часть pytest, ручной запуск).
+  tests/     — pytest-тесты.
+
+Как взаимодействуют модули
+  bot.py импортирует settings из config.py, init_db/session_factory из db.base,
+  роутеры из handlers/ и reminders_loop из services/reminders.py. Роутеры
+  регистрируются в Dispatcher в строгом порядке: common.commands_router,
+  start.router, search.router, analysis.router, messages.router,
+  chat_monitor.router, crm.router, menu.router, common.fallback_router
+  (fallback — последним, ловит всё необработанное).
+
+  Хендлеры (handlers/) вызывают:
+    — db.repo для CRUD (create_lead, get_lead, list_leads, set_lead_status,
+      set_lead_note, save_lead_analysis, create_reminder, get_due_reminders и т.д.);
+    — services.places.search_companies для поиска;
+    — services.ai.analyze_company / generate_messages для AI;
+    — handlers.company.format_company_card / format_lead_card для рендера;
+    — keyboards.main_menu.* для клавиатур;
+    — utils.safe_send.safe_answer / safe_edit для отправки;
+    — utils.emoji_config.E для эмодзи.
+
+  chat_monitor.runner — отдельный процесс: Telethon слушает events.NewMessage,
+  вызывает chat_monitor.processor.process_candidate, который:
+    1) фильтрует через chat_monitor.filtering.find_keywords;
+    2) скорит через services.ai.score_nail_chat_message;
+    3) сохраняет через db.repo.create_chat_lead в общую таблицу leads.
+
+  services.reminders.reminders_loop — фоновая asyncio-задача в bot.py: опрашивает
+  db.repo.get_due_reminders и отправляет через safe_bot_send.
+
+Паттерны
+  — Router-based архитектура aiogram 3.x: каждый модуль хендлеров — свой Router
+    с декораторами @router.message / @router.callback_query.
+  — FSM (Finite State Machine): сценарии поиска, заметок, редактирования
+    сообщений, напоминаний и настроек Chat Monitor используют aiogram FSM.
+  — Repository pattern: db/repo.py инкапсулирует все запросы к БД.
+  — Strategy pattern для LLM: абстрактный LLMClient с двумя реализациями
+    (AnthropicClient, OpenAICompatClient), выбор через settings.llm_provider.
+  — Fallback chain: safe_send ловит TelegramBadRequest -> повтор с plain-эмодзи
+    -> повтор с plain text (без HTML).
+  — Data ownership scoping: все CRUD-операции фильтруются по owner_tg_id.
+
+Технологии
+  — Python 3.11+ (требуется: X | Y typing, asyncio.TimeoutError == TimeoutError).
+  — aiogram 3.29.1 — Telegram Bot API framework (polling, FSM, routers).
+  — SQLAlchemy 2.0.51 + aiosqlite 0.22.1 — async ORM, SQLite.
+  — pydantic-settings 2.14.2 — конфигурация из .env.
+  — anthropic 0.116.0 — Claude SDK (один из LLM-провайдеров).
+  — openai 2.44.0 — OpenAI-совместимый SDK (второй LLM-провайдер).
+  — aiohttp 3.14.1 — HTTP-клиент для Overpass API.
+  — Telethon 1.44.0 — Telegram userbot для Chat Lead Monitor.
+  — qrcode[pil] 8.2 — генерация QR для Telethon-логина.
+  — pytest 9.1.1 + pytest-asyncio 1.4.0 + pytest-cov 7.1.0 — тестирование.
+
+Критически важные библиотеки
+  — aiogram: без него бот не работает (polling, роутеры, FSM, типы).
+  — SQLAlchemy + aiosqlite: хранение данных (SQLite, async).
+  — anthropic и openai: LLM-анализ и генерация (хотя любой один — необязателен,
+    если используется второй провайдер).
+  — aiohttp: Overpass API (поиск компаний).
+  — Telethon: Chat Lead Monitor (отдельный процесс, без него мониторинг чатов
+    не работает, но бот-функции продолжают работать).
+  — pydantic-settings: конфигурация (без неё нет .env-парсинга).
+
+
+================================================================================
+3. ПОЛНЫЙ СПИСОК ФУНКЦИЙ
+================================================================================
+
+Пользовательские функции
+
+  3.1. /start — регистрация нового пользователя в БД (get_or_create_user),
+       приветствие, главное меню. Если пользователь уже существует — другой
+       текст («С возвращением»). Очищает FSM-состояние.
+
+  3.2. /help — текстовая подсказка со списком команд и кнопкой главного меню.
+
+  3.3. /cancel — отмена текущего FSM-сценария, очистка state, возврат в меню.
+       Если state был — «Действие отменено», если не было — «Отменять нечего».
+
+  3.4. Главное меню — 4 кнопки: «Новый поиск», «Мои лиды», «Chat Monitor»,
+       «Настройки».
+
+  3.5. Поиск компаний (FSM):
+       — Ввод города текстом (SearchFSM.waiting_city).
+       — Выбор категории из 8 вариантов кнопкой (SearchFSM.waiting_category):
+         Барбершоп/Парикмахерская, Салон красоты, Кафе, Ресторан, Фитнес-клуб,
+         Стоматология, Автосервис, Магазин цветов.
+       — Поиск через Overpass API, пагинация результатов (SearchFSM.browsing):
+         карточки с навигацией ◀/▶, кнопки «Сохранить в лиды» и «Анализ».
+       — Карточка компании показывает: название, адрес, телефон, сайт,
+         ссылки на 2ГИС и Instagram (percent-кодированные).
+       — Сохранение в лиды с дедупликацией (find_lead_by_name_address).
+       — Сохранение в FSM: какие результаты уже сохранены (saved_leads dict).
+
+  3.6. AI-анализ компании:
+       — Из карточки поиска (callback san:) — сначала автоматически сохраняет
+         в лиды, потом анализирует.
+       — Из карточки лида (callback anl:) — анализ или повторный анализ.
+       — Показывает статус «Анализирую…», затем обновлённую карточку лида.
+       — Сохраняет: ai_score (0-100), ai_analysis (текст), has_online_booking
+         (True/False/None) в БД.
+
+  3.7. Генерация сообщений для холодного контакта:
+       — Доступна только для лидов с ai_analysis (иначе alert «Сначала
+         сделай AI-анализ»).
+       — Генерирует 2 варианта: короткое (2-3 предложения) и развёрнутое
+         (5-8 предложений).
+       — Показывает в <pre> блоках (удобно копировать).
+       — Сохраняет варианты в FSM для последующего редактирования.
+
+  3.8. Редактирование сгенерированных сообщений:
+       — Кнопки «Изменить короткое» / «Изменить развёрнутое» (FSM
+         EditMessageFSM.waiting_text).
+       — Пользователь присылает новый текст, он заменяет соответствующий
+         вариант в FSM и перерисовывается.
+
+  3.9. CRM — список лидов:
+       — Фильтры: Все, по статусу (Новый/Написали/Ответил/Клиент/Отказ),
+         «Без онлайн-записи» (только явный has_online_booking=False),
+         «Chat Monitor» (source='chat_monitor').
+       — Список кнопок с именами и статусами (до 50 лидов).
+       — Пустой список — подсказка «Начни с поиска».
+
+  3.10. CRM — карточка лида:
+       — Показывает все поля: имя, адрес, телефон, сайт, статус, AI-оценку,
+         наличие онлайн-записи, строку «насколько нужен мой сервис» (интерпретация
+         ai_score + has_online_booking), AI-анализ, заметку.
+       — Для chat_monitor-лидов дополнительно: ниша, чат-источник, username
+         автора (ссылка на Telegram-профиль), дата сообщения, релевантность,
+         текст исходного сообщения.
+       — Кнопки: Статус, Заметка, Анализ (или повторный), Сообщения для контакта
+         (если есть анализ), Напомнить, К лидам.
+       — Ссылки на 2ГИС и Instagram для OSM-лидов (не для chat_monitor).
+
+  3.11. CRM — смена статуса:
+       — Меню статусов (5 кнопок), callback sts:<id>:<status>.
+       — Валидация статуса в хендлере и в repo (двойная проверка).
+       — Невалидный статус -> alert, лид не меняется.
+
+  3.12. CRM — заметки:
+       — FSM NoteFSM.waiting_note: ввод текста заметки.
+       — Показ текущей заметки перед вводом новой.
+       — Пустой текст отклоняется.
+
+  3.13. CRM — напоминания:
+       — Быстрые интервалы: 1, 3, 7, 14 дней (callback remd:<id>:<days>).
+       — Своя дата: FSM ReminderFSM.waiting_date, формат ДД.ММ.ГГГГ ЧЧ:ММ
+         (или только дата — время по умолчанию 10:00). Валидация: даты в
+         прошлом отклоняются. Время — UTC.
+
+  3.14. Chat Monitor — меню настроек:
+       — Показывает: статус (включён/выключен), число чатов, threshold,
+         готовность Telethon .env (warning если не заполнен).
+       — Кнопки: Список чатов, Добавить чат, Удалить чат (если есть),
+         Изменить threshold, Включить/Выключить мониторинг, Инструкция запуска.
+
+  3.15. Chat Monitor — управление чатами:
+       — Список чатов с кнопками удаления по индексу.
+       — Добавление: ввод @username или числового chat_id (можно несколько
+         через запятую/перенос). Парсинг URL (t.me/...), нормализация.
+       — Удаление по индексу.
+
+  3.16. Chat Monitor — threshold:
+       — FSM ввод числа 0-1, валидация (запятая/точка), сохранение в БД.
+
+  3.17. Chat Monitor — вкл/выкл:
+       — Тоггл is_enabled в БД, мгновенное обновление UI.
+
+  3.18. Chat Monitor — инструкция запуска:
+       — Текстовая подсказка: как запустить runner, куда приходит код, и т.д.
+
+  3.19. Настройки (заглушка):
+       — Текст: «Настройки пока не требуются — бот работает из коробки.
+         Токены задаются в файле .env.»
+
+Автоматические процессы и фоновые задачи
+
+  3.20. Фоновый поллер напоминаний (reminders_loop):
+       — Запускается как asyncio.create_task в bot.py.
+       — Интервал: settings.reminders_poll_interval (по умолчанию 60 сек).
+       — poll_reminders_once: выбирает все напоминания с remind_at <= now и
+         is_sent=False, помечает is_sent=True ДО отправки (защита от дублей
+         при рестарте), отправляет через safe_bot_send.
+       — При ошибке отправки is_sent откатывается на False (mark_reminder_unsent),
+         напоминание будет повторено на следующей итерации.
+       — Любая ошибка логируется, цикл не умирает.
+       — Текст напоминания: «Напоминание по лиду <b>Имя</b>» + текст напоминания.
+         Имя лида HTML-экранируется.
+
+  3.21. Chat Lead Monitor (runner.py — отдельный процесс):
+       — Telethon слушает events.NewMessage во всех чатах.
+       — На каждое новое сообщение: загружает runtime-конфиг из БД
+         (load_runtime_config), проверяет is_enabled и chats.
+       — event_matches_chat_refs: сопоставляет chat_id или username чата с
+         настроенным списком.
+       — candidate_from_event: извлекает текст, sender id/username, chat
+         title/id, дату, message_id.
+       — process_candidate:
+         1) find_keywords: keyword-фильтр (без сети). Если нет совпадений — skip.
+         2) score_nail_chat_message: LLM-скоринг 0.0-1.0 + reasoning + is_solo_master.
+         3) Если score < min_score — skip (логируется).
+         4) Дедупликация: find_chat_lead_by_message (по chat_user_id + chat_message_id).
+         5) create_chat_lead: сохраняет как Lead с source='chat_monitor'.
+       — AIError логируется как warning, остальные исключения — как exception,
+         обработка сообщения не валит весь runner.
+
+  3.22. init_db — создание схемы БД:
+       — Base.metadata.create_all (создаёт отсутствующие таблицы).
+       — _ensure_lead_columns: лёгкая миграция — ALTER TABLE ADD COLUMN для
+         недостающих колонок в leads (has_online_booking, niche, source_chat,
+         chat_username, chat_user_id, chat_message_id, message_text,
+         message_date, relevance_score). Нужна потому что create_all не
+         добавляет колонки в существующие таблицы (а Alembic не используется).
+
+Логирование
+
+  3.23. Стандартное logging.basicConfig(level=INFO) в bot.py.
+  3.24. Отдельные логгеры в services/ai.py, services/places.py,
+        services/reminders.py, chat_monitor/processor.py, chat_monitor/runner.py,
+        handlers/analysis.py, handlers/messages.py.
+  3.25. Логируются: ошибки API (Anthropic/OpenAI), ошибки Overpass, ошибки
+        отправки напоминаний, ошибки Chat Monitor, старт/остановка бота,
+        предупреждения о версии Python и venv.
+
+Обработка ошибок
+
+  3.26. AI-ошибки: три класса — AIError (общая), AIRateLimitError (429),
+        AIOverloadError (5xx). Хендлеры показывают разные сообщения пользователю.
+  3.27. PlacesError — любая ошибка Overpass (сеть, таймаут, HTTP 4xx/5xx, плохой
+        JSON). Хендлер поиска показывает «Сервис поиска сейчас недоступен».
+  3.28. TelegramBadRequest — перехватывается в safe_send, авто-fallback на
+        plain-эмодзи, затем на plain text.
+  3.29. Невалидные callback_data — перехватываются (ValueError на int-парсинге),
+        показывается alert «Некорректные данные».
+  3.30. Невалидные статусы — двойная проверка (хендлер + repo), alert + ValueError.
+  3.31. Ctrl+C — KeyboardInterrupt ловится в bot.run(), логируется «Бот остановлен
+        пользователем», код выхода 0 (без traceback).
+  3.32. SystemExit (sys.exit(1) при отсутствии BOT_TOKEN) — НЕ перехватывается
+        в run(), ненулевой код выхода сохраняется.
+  3.33. Обрезка текста: truncate_telegram_text обрезает до 4096 символов с
+        суффиксом «… текст обрезан».
+
+Безопасность
+
+  3.34. HTML-экранирование: escape() применяется ко всем пользовательским и
+        LLM-данным в карточках (company.py, messages.py). Собственная HTML-разметка
+        эмодзи (E.*) НЕ экранируется.
+  3.35. Overpass QL-инъекция: _sanitize_ql убирает \, ", [, ], ~ из ввода города.
+  3.36. Data ownership: все запросы к лидам и напоминаниям фильтруются по
+        owner_tg_id. Чужой лид недоступен (get_lead вернёт None).
+  3.37. Валидация статусов: is_valid_status проверяет по frozenset VALID_STATUSES.
+  3.38. Секреты Telethon (API_ID, API_HASH, PHONE, SESSION_PATH) хранятся только
+        в .env, не вводятся через бот, не хранятся в БД.
+  3.39. Mask телефона в логах runner.py (_mask_phone: последние 4 цифры).
+  3.40. Нормализация телефона (normalize_phone): убирает пробелы/скобки/дефисы.
+
+Резервное копирование
+  Не реализовано. Файл sales_agent.db — единственная копия данных. Сессионный
+  файл Telethon (chat_monitor.session) чувствительный, в .gitignore.
+
+Экспорт / Импорт
+  Не реализовано. Нет функций экспорта/импорта лидов.
+
+Проверки
+  3.41. _check_runtime_env в bot.py: предупреждение если Python < 3.11 или
+        запуск не из venv (sys.prefix == sys.base_prefix).
+  3.42. settings.llm_ready — проверка наличия ключа LLM-провайдера.
+  3.43. settings.chat_monitor_ready — проверка полноты конфига Telethon.
+  3.44. runner._ensure_ready — проверка перед стартом Telethon (краш если
+        конфиг неполный).
+  3.45. check_emoji_config — статистика маппинга эмодзи (total, configured,
+        missing, percent). Используется в тестах.
+
+
+================================================================================
+4. ЛОГИКА РАБОТЫ
+================================================================================
+
+Запуск бота (bot.py)
+
+  Шаг 1. _check_runtime_env()
+    — Проверка версии Python (< 3.11 -> warning).
+    — Проверка venv (sys.prefix == sys.base_prefix -> warning «запущен НЕ из venv»).
+    — Не блокирующие: бот стартует даже с warning.
+
+  Шаг 2. Проверка BOT_TOKEN
+    — Если settings.bot_token пустой -> logger.error + sys.exit(1).
+
+  Шаг 3. Проверка LLM
+    — Если settings.llm_ready == False -> warning «AI-анализ работать не будет».
+    — Бот стартует, но AI-функции покажут ошибку при вызове.
+
+  Шаг 4. init_db()
+    — Создаёт таблицы (create_all).
+    — Досоздаёт недостающие колонки в leads (_ensure_lead_columns).
+
+  Шаг 5. Создание Bot и Dispatcher
+    — Bot с parse_mode=HTML (DefaultBotProperties).
+    — Dispatcher, include_routers в строгом порядке:
+      commands_router -> start -> search -> analysis -> messages ->
+      chat_monitor -> crm -> menu -> fallback_router.
+
+  Шаг 6. Запуск фонового поллера напоминаний
+    — asyncio.create_task(reminders_loop(bot, session_factory, interval)).
+
+  Шаг 7. dp.start_polling(bot)
+    — Бот начинает принимать обновления (long polling).
+
+  Шаг 8. Остановка (Ctrl+C)
+    — KeyboardInterrupt ловится в run().
+    — reminders_task.cancel().
+    — bot.session.close().
+    — Лог «Бот остановлен пользователем», код 0.
+
+Запуск Chat Lead Monitor (chat_monitor/runner.py — отдельный процесс)
+
+  Шаг 1. _ensure_ready() — проверка конфига (краш если неполный).
+  Шаг 2. init_db() — та же инициализация БД.
+  Шаг 3. Создание TelegramClient(session_path, api_id, api_hash).
+  Шаг 4. load_runtime_config() — загрузка настроек из БД (чаты, threshold, is_enabled).
+  Шаг 5. Регистрация handler @client.on(events.NewMessage()).
+  Шаг 6. client.start(phone, force_sms) — авторизация Telethon.
+  Шаг 7. client.run_until_disconnected() — бесконечный цикл слушания.
+
+  На каждое новое сообщение:
+    — load_runtime_config() (заново из БД — настройки могли измениться через бот).
+    — Проверка is_enabled и chats.
+    — event_matches_chat_refs — фильтр по чатам.
+    — candidate_from_event — извлечение данных.
+    — process_candidate — keyword-фильтр -> LLM-скоринг -> сохранение.
+    — AIError -> warning, Exception -> exception, обработка не валит runner.
+
+
+================================================================================
+5. ПОЛЬЗОВАТЕЛЬСКИЕ СЦЕНАРИИ
+================================================================================
+
+Сценарий 1: Новый пользователь — поиск и анализ
+
+  /start
+    -> Регистрация в БД, приветствие, главное меню
+  -> «Новый поиск»
+    -> FSM: «В каком городе ищем?»
+  -> Ввод города (например, «Астана»)
+    -> FSM: выбор категории из 8 кнопок
+  -> Выбор категории (например, «Кафе»)
+    -> Поиск через Overpass API
+    -> «Нашёл N компаний. Листай карточки:»
+    -> Карточка компании с кнопками: Сохранить / Анализ / ◀ N/M ▶
+  -> «Анализ»
+    -> Автосохранение в лиды -> LLM-анализ -> карточка лида с оценкой
+  -> «Сообщения для контакта» (появляется после анализа)
+    -> Генерация 2 вариантов сообщений
+    -> Кнопки: Изменить короткое / Изменить развёрнутое
+  -> Возврат в меню
+
+Сценарий 2: CRM — работа с лидами
+
+  /start -> «Мои лиды»
+    -> Фильтры: Все / по статусу / Без онлайн-записи / Chat Monitor
+  -> Выбор фильтра (например, «Все»)
+    -> Список лидов (до 50 кнопок)
+  -> Выбор лида
+    -> Карточка лида с кнопками
+  -> «Статус»
+    -> 5 кнопок статусов
+  -> Выбор статуса (например, «Написали»)
+    -> Обновление статуса, перерисовка карточки
+  -> «Заметка»
+    -> FSM: «Пришли текст новой заметки:»
+  -> Ввод заметки
+    -> Сохранение, перерисовка карточки с заметкой
+  -> «Напомнить»
+    -> 1/3/7/14 дней или «Своя дата»
+  -> Выбор интервала (например, «3 дня»)
+    -> «Напомню через 3 дн.» (alert)
+  -> Возврат в меню
+
+Сценарий 3: Chat Monitor — настройка
+
+  /start -> «Chat Monitor»
+    -> Меню: статус, число чатов, threshold, готовность .env
+  -> «Добавить чат»
+    -> FSM: «Пришли username или chat_id»
+  -> Ввод (например, «@nails_chat, -1001234567890»)
+    -> Парсинг, нормализация, сохранение, обновление меню
+  -> «Изменить threshold»
+    -> FSM: «Пришли threshold от 0 до 1»
+  -> Ввод (например, «0.65»)
+    -> Валидация, сохранение, обновление меню
+  -> «Выключить мониторинг» / «Включить мониторинг»
+    -> Тоггл, мгновенное обновление UI
+  -> «Инструкция запуска»
+    -> Текстовая подсказка
+
+Сценарий 4: Напоминание срабатывает (автоматически)
+
+  Поллер (каждые 60 сек) находит просроченное неотправленное напоминание
+    -> Помечает is_sent=True (до отправки)
+    -> Отправляет сообщение пользователю (safe_bot_send)
+    -> При ошибке: откат is_sent=False, повтор на следующей итерации
+
+
+================================================================================
+6. БАЗА ДАННЫХ
+================================================================================
+
+СУБД: SQLite (через aiosqlite), async.
+URL: sqlite+aiosqlite:///./sales_agent.db (настраивается через DB_URL).
+Миграции: нет Alembic. create_all + _ensure_lead_columns (ALTER TABLE ADD COLUMN).
+
+Таблица: users
+  Назначение: регистрация пользователей бота.
+  Поля:
+    id            — Integer, primary key (autoincrement).
+    tg_user_id    — BigInteger, unique, index. Telegram user id.
+    username      — String(255), nullable. Telegram @username.
+    created_at    — DateTime, default utcnow().
+  Связи: нет прямых FK, но tg_user_id используется как owner_tg_id в leads и
+  reminders.
+
+Таблица: leads
+  Назначение: основная CRM-таблица. Хранит и OSM-лиды, и chat_monitor-лиды.
+  Поля:
+    id                  — Integer, primary key.
+    owner_tg_id         — BigInteger, index. Telegram id владельца (data scoping).
+    name                — String(500). Название компании или @username (для чатов).
+    address             — String(1000), nullable. Адрес или source_chat (для чатов).
+    phone               — String(100), nullable.
+    website             — String(1000), nullable.
+    socials             — Text, nullable. JSON-строка соцсетей (почти всегда пусто).
+    source              — String(50), default 'osm', index. 'osm' или 'chat_monitor'.
+    ai_score            — Integer, nullable. Оценка AI 0-100.
+    ai_analysis         — Text, nullable. Текст анализа (слабые места, оффер).
+    has_online_booking  — Boolean, nullable. True/False/None.
+    niche               — String(50), nullable, index. Ниша (пока только 'nail' для чатов).
+    source_chat         — String(500), nullable. Название/id чата-источника.
+    chat_username       — String(255), nullable. @username автора сообщения.
+    chat_user_id        — BigInteger, nullable, index. Telegram user id автора.
+    chat_message_id     — BigInteger, nullable. id сообщения в чате (дедуп).
+    message_text        — Text, nullable. Текст исходного сообщения.
+    message_date        — DateTime, nullable. Дата сообщения.
+    relevance_score     — Float, nullable. LLM-score 0.0-1.0.
+    status              — String(16), default 'new', index. LeadStatus enum value.
+    note                — Text, nullable. Заметка пользователя.
+    created_at          — DateTime, default utcnow().
+    updated_at          — DateTime, default utcnow(), onupdate utcnow().
+  Индексы: owner_tg_id, source, niche, chat_user_id, status.
+  Связи: Reminder.lead_id -> leads.id (ForeignKey).
+
+Таблица: reminders
+  Назначение: напоминания по лидам.
+  Поля:
+    id            — Integer, primary key.
+    lead_id       — Integer, ForeignKey('leads.id'), index.
+    owner_tg_id   — BigInteger, index.
+    remind_at     — DateTime, index. Когда напомнить (UTC).
+    text          — Text, default ''. Текст напоминания.
+    is_sent       — Boolean, default False, index. Отправлено ли.
+  Индексы: lead_id, owner_tg_id, remind_at, is_sent.
+
+Таблица: chat_monitor_settings
+  Назначение: настройки Chat Monitor per user.
+  Поля:
+    id            — Integer, primary key.
+    owner_tg_id   — BigInteger, unique, index.
+    is_enabled    — Boolean, default True, index.
+    chats         — Text, default '[]'. JSON-массив строк (@username или chat_id).
+    min_score     — Float, default 0.7. Порог LLM-скора для сохранения лида.
+    created_at    — DateTime, default utcnow().
+    updated_at    — DateTime, default utcnow(), onupdate utcnow().
+  Индексы: owner_tg_id (unique), is_enabled.
+  Связи: нет.
+
+Связи между таблицами
+  users.tg_user_id ~ leads.owner_tg_id (логическая, не FK).
+  leads.id <- reminders.lead_id (ForeignKey).
+  users.tg_user_id ~ reminders.owner_tg_id (логическая, не FK).
+  users.tg_user_id ~ chat_monitor_settings.owner_tg_id (логическая, не FK).
+
+
+================================================================================
+7. ВСЕ НАСТРОЙКИ
+================================================================================
+
+Файл: .env (формат pydantic-settings, UTF-8).
+
+Переменные окружения и их назначение:
+
+  BOT_TOKEN (строка, по умолчанию '')
+    Токен бота от @BotFather. Обязательно для запуска. Если пустой —
+    bot.py логирует ошибку и sys.exit(1).
+
+  LLM_PROVIDER (строка, по умолчанию 'anthropic')
+    Выбор LLM-провайдера: 'anthropic' или 'openrouter' (или 'openai',
+    'moonshot', 'openai_compat' — все создают OpenAICompatClient).
+
+  LLM_MODEL (строка, по умолчанию '')
+    Имя модели у выбранного провайдера. Для openrouter: 'moonshotai/kimi-k2.6:free'.
+    Для anthropic: если пусто, берётся ANTHROPIC_MODEL.
+
+  LLM_BASE_URL (строка, по умолчанию 'https://openrouter.ai/api/v1')
+    base_url для OpenAI-совместимого провайдера. Для anthropic не используется.
+
+  LLM_API_KEY (строка, по умолчанию '')
+    Ключ выбранного провайдера. Для anthropic: если пусто, берётся
+    ANTHROPIC_API_KEY (через resolved_anthropic_key).
+
+  LLM_TIMEOUT_SECONDS (float, по умолчанию 60.0)
+    Таймаут одного запроса к LLM. Бесплатные модели отвечают медленнее.
+
+  ANTHROPIC_API_KEY (строка, по умолчанию '')
+    Legacy-ключ для Anthropic. Используется, когда LLM_PROVIDER=anthropic
+    и LLM_API_KEY пустой.
+
+  ANTHROPIC_MODEL (строка, по умолчанию 'claude-sonnet-4-5')
+    Модель Anthropic по умолчанию. Переопределяется LLM_MODEL.
+
+  DB_URL (строка, по умолчанию 'sqlite+aiosqlite:///./sales_agent.db')
+    URL подключения к БД.
+
+  REMINDERS_POLL_INTERVAL (int, по умолчанию 60)
+    Интервал фонового поллера напоминаний, секунды.
+
+  CHAT_MONITOR_OWNER_TG_ID (int, по умолчанию 0)
+    Telegram id владельца, в CRM которого сохраняются чат-лиды.
+
+  CHAT_MONITOR_API_ID (int, по умолчанию 0)
+    Telegram API ID с my.telegram.org/apps.
+
+  CHAT_MONITOR_API_HASH (строка, по умолчанию '')
+    Telegram API hash.
+
+  CHAT_MONITOR_PHONE (строка, по умолчанию '')
+    Номер телефона для Telethon (формат +7...).
+
+  CHAT_MONITOR_SESSION_PATH (строка, по умолчанию 'chat_monitor.session')
+    Путь к файлу сессии Telethon.
+
+  CHAT_MONITOR_FORCE_SMS (bool, по умолчанию False)
+    Принудительный SMS для кода авторизации (если не приходит в приложение).
+
+  CHAT_MONITOR_CHATS (строка, по умолчанию '')
+    Начальный список чатов через запятую: usernames или числовые chat_id.
+    Пример: '@open_nails_chat,-1001234567890'. Парсится в chat_monitor_chat_list.
+
+  CHAT_MONITOR_MIN_SCORE (float, по умолчанию 0.7)
+    Начальный порог LLM-score для сохранения chat-лида.
+
+Производные свойства (в Settings):
+  resolved_anthropic_key — LLM_API_KEY or ANTHROPIC_API_KEY.
+  resolved_anthropic_model — LLM_MODEL or ANTHROPIC_MODEL.
+  llm_ready — bool, достаточен ли ключ для выбранного провайдера.
+  chat_monitor_chat_list — list[int|str], парсинг CHAT_MONITOR_CHATS.
+  chat_monitor_ready — bool, достаточен ли конфиг Telethon.
+
+
+================================================================================
+8. ВСЕ ЗАВИСИМОСТИ
+================================================================================
+
+Верхнеуровневые пакеты (requirements.txt):
+
+  aiogram==3.29.1
+    Telegram Bot API framework. Polling, routers, FSM, типы (Message,
+    CallbackQuery, InlineKeyboardMarkup). Критическая зависимость.
+
+  SQLAlchemy==2.0.51
+    ORM. Async engine, sessionmaker, DeclarativeBase, mapped_column.
+    Модели, CRUD, миграции (create_all + ALTER TABLE).
+
+  aiosqlite==0.22.1
+    Async-драйвер SQLite для SQLAlchemy. Без него async-запросы к БД не работают.
+
+  pydantic-settings==2.14.2
+    Конфигурация из .env. BaseSettings, SettingsConfigDict. Авто-парсинг
+    типов (int, float, bool, str).
+
+  anthropic==0.116.0
+    Anthropic Claude SDK. AsyncAnthropic, messages.create. Один из двух
+    LLM-провайдеров. Импортируется всегда (даже если не используется).
+
+  openai==2.44.0
+    OpenAI SDK (используется для OpenAI-совместимых эндпоинтов: OpenRouter,
+    Moonshot и т.д.). AsyncOpenAI, chat.completions.create. Ленивый импорт
+    (только в OpenAICompatClient).
+
+  aiohttp==3.14.1
+    HTTP-клиент для запросов к Overpass API (OpenStreetMap). ClientSession,
+    post, json. Таймауты, обработка ошибок сети.
+
+  Telethon==1.44.0
+    Telegram userbot для Chat Lead Monitor. TelegramClient, events.NewMessage.
+    Авторизация по телефону/QR. Отдельный процесс.
+
+  qrcode[pil]==8.2
+    Генерация QR-кода для Telethon-логина (scripts/telethon_qr_login.py).
+    qrcode.make + PIL для сохранения PNG.
+
+  pytest==9.1.1
+    Фреймворк тестирования.
+
+  pytest-asyncio==1.4.0
+    Поддержка async-тестов. asyncio_mode=auto в pytest.ini.
+
+  pytest-cov==7.1.0
+    Покрытие кода (pytest --cov).
+
+Полный lock (requirements-lock.txt) включает 59 пакетов, включая транзитивные:
+  httpx==0.28.1, pydantic==2.13.4, pydantic_core==2.46.4, anyio==4.14.1,
+  greenlet==3.5.3, magic-filter==1.0.12, certifi, idna, yarl, multidict и т.д.
+  Lock создан в чистом venv 3.11 после pip install -r requirements.txt,
+  pip check — без конфликтов. Назначение: воспроизводимая установка без риска
+  подтянуть несовместимую версию (как было с httpx).
+
+
+================================================================================
+9. БЕЗОПАСНОСТЬ
+================================================================================
+
+Авторизация
+  — Пользователь идентифицируется по Telegram user id (message.from_user.id).
+    Регистрация автоматическая при /start (get_or_create_user).
+  — Никаких паролей, ролей или прав доступа нет. Бот — личный: каждый
+    пользователь видит только свои данные (data scoping по owner_tg_id).
+  — Chat Lead Monitor привязан к одному конкретному Telegram-аккаунту
+    (CHAT_MONITOR_OWNER_TG_ID). Если другой пользователь настраивает чаты
+    через бот, runner их не использует (показывается warning в UI).
+
+Проверки и ограничения
+  — Валидация статусов лидов: is_valid_status (frozenset VALID_STATUSES).
+    Двойная проверка: в хендлере (change_status) и в repo (set_lead_status).
+    Невалидный статус -> alert + ValueError, данные не меняются.
+  — Валидация callback_data: int-парсинг в try/except, alert при ошибке.
+  — Валидация дат напоминаний: parse_custom_date (только ДД.ММ.ГГГГ [ЧЧ:ММ]),
+    проверка будущего времени (dt <= utcnow() -> отказ).
+  — Валидация threshold Chat Monitor: parse_min_score (0-1, запятая/точка).
+  — Валидация chat refs: normalize_chat_ref (убирает t.me/, @, пустые,
+    дубликаты). Парсинг URL, usernames, числовых id.
+  — Валидация дней напоминаний: только 1, 3, 7, 14 (проверка in tuple).
+  — Лимит результатов поиска: MAX_LIMIT=60 (Overpass может вернуть тысячи).
+  — Лимит длины сообщения: truncate_telegram_text (4096 символов).
+
+Защита от ошибок
+  — Все LLM-вызовы обёрнуты в try/except с тремя классами ошибок
+    (AIError, AIRateLimitError, AIOverloadError). Бот не падает.
+  — Overpass-вызовы обёрнуты в PlacesError (сеть, таймаут, HTTP, JSON).
+  — safe_send: три уровня fallback (HTML -> plain emoji -> plain text).
+  — Фоновый поллер: любая ошибка логируется, цикл не умирает.
+  — Chat Monitor runner: AIError -> warning, Exception -> exception, не валит.
+
+Защита от повторных запросов
+  — Дедупликация OSM-лидов: find_lead_by_name_address (name + address).
+  — Дедупликация chat-лидов: find_chat_lead_by_message (chat_user_id +
+    chat_message_id).
+  — Напоминания: is_sent=True ДО отправки (защита от дублей при рестарте).
+    При ошибке отправки — откат is_sent=False.
+  — FSM saved_leads: отслеживает, какие результаты поиска уже сохранены.
+
+Защита данных
+  — HTML-экранирование (escape) всех пользовательских и LLM-данных в карточках.
+  — Overpass QL-санитизация (_sanitize_ql): убирает \, ", [, ], ~.
+  — Секреты Telethon (API_ID, API_HASH, PHONE, session) только в .env, не в БД.
+  — Маска телефона в логах runner (_mask_phone).
+  — .gitignore: .env, venv/, *.db, *.sqlite, *.session, *.session-journal,
+    .coverage, __pycache__/, .pytest_cache/, IDE-файлы (.idea/, .vscode/).
+
+Обработка исключений
+  — Все внешние вызовы (LLM, Overpass, Telegram API) перехватывают
+    специфичные исключения и заворачивают в доменные (AIError, PlacesError,
+    TelegramBadRequest). Пользователь видит понятное сообщение, не traceback.
+  — Fallback-router ловит все необработанные callback_query (stale search cards)
+    и все необработанные message (показывает «не нашёл подходящего действия»).
+
+
+================================================================================
+10. ЧТО УЖЕ РЕАЛИЗОВАНО
+================================================================================
+
+Полностью реализовано:
+
+  10.1. /start — регистрация, приветствие, главное меню (с разным текстом
+        для новых и возвращающихся пользователей).
+  10.2. /help — подсказка с командами.
+  10.3. /cancel — отмена FSM, возврат в меню.
+  10.4. Fallback — обработка неизвестных команд и текста.
+  10.5. Stale search card callbacks — alert «карточка устарела» для
+        spg/ssv/san callback'ов вне FSM browsing.
+  10.6. Поиск компаний по 8 категориям (барбершоп, салон красоты, кафе,
+        ресторан, фитнес, стоматология, автосервис, флорист) через Overpass API.
+  10.7. Нормализация названия города: регистр (title case), служебные слова
+        (на, де, ла и т.д. в нижнем регистре), мультиязычные OSM-теги
+        (name, name:ru, name:en).
+  10.8. Пагинация результатов поиска (◀/▶, индекс N/M).
+  10.9. Карточка компании: название, адрес, телефон, сайт, ссылки на 2ГИС и
+        Instagram (percent-кодирование, HTML-безопасность).
+  10.10. Сохранение в лиды с дедупликацией (find_lead_by_name_address).
+  10.11. AI-анализ: score 0-100, слабые места, оффер, has_online_booking.
+        Промпт на русском, JSON-ответ, валидация.
+  10.12. Детерминированное добавление оффера «запись через Telegram-бота»
+        при has_online_booking=False.
+  10.13. Генерация 2 вариантов сообщений (короткое + развёрнутое).
+  10.14. Редактирование сообщений (замена short/long варианта).
+  10.15. Карточка лида: все поля, статус, AI-оценка, онлайн-запись, заметка,
+        строка приоритета, ссылки на 2ГИС/Instagram.
+  10.16. Список лидов с фильтрами: все, по статусу (5), без онлайн-записи,
+        chat_monitor.
+  10.17. Смена статусов (5 вариантов, двойная валидация).
+  10.18. Заметки по лидам.
+  10.19. Напоминания: быстрые (1/3/7/14 дней) и своя дата (ДД.ММ.ГГГГ ЧЧ:ММ).
+  10.20. Фоновый поллер напоминаний (mark_sent до отправки, откат при ошибке,
+        беззасыпный цикл).
+  10.21. Chat Lead Monitor: Telethon runner, keyword-фильтр, LLM-скоринг,
+        дедупликация, сохранение в CRM.
+  10.22. Chat Monitor настройки через бот: чаты (добавить/удалить), threshold,
+        вкл/выкл, инструкция запуска, статус готовности.
+  10.23. Кастомные премиум-эмодзи (E.* — HTML, P.* — plain) из пака tgmacicons.
+  10.24. Fallback эмодзи на plain-юникод при TelegramBadRequest (EMOJI_INVALID).
+  10.25. Обрезка текста до 4096 символов.
+  10.26. Переключаемый LLM-провайдер (Anthropic / OpenAI-совместимый) через .env.
+  10.27. QR-логин Telethon (scripts/telethon_qr_login.py).
+  10.28. Живой прогон всех функций (scripts/live_walkthrough.py).
+  10.29. Smoke-тест LLM (scripts/smoke_llm.py).
+  10.30. Лаунчеры run.bat / run.sh (активация venv + запуск bot.py).
+  10.31. Чистая остановка по Ctrl+C (без traceback, код 0).
+  10.32. Предупреждение о запуске не из venv / не на Python 3.11.
+  10.33. init_db с лёгкой миграцией (ALTER TABLE ADD COLUMN для leads).
+  10.34. 205 тестов (фактический счётчик pytest --co; README указывает 166,
+        вероятно устарело) с покрытием (pytest --cov), in-memory SQLite, моки
+        внешних сервисов.
+
+
+================================================================================
+11. ЧТО ОТСУТСТВУЕТ
+================================================================================
+
+  11.1. Многопользовательская модель. Бот — личный: хотя данные скоупятся
+        по owner_tg_id, нет ролей, администрирования, разделения квот.
+        Chat Lead Monitor жёстко привязан к одному CHAT_MONITOR_OWNER_TG_ID.
+
+  11.2. Экспорт/импорт данных. Нет функций выгрузки лидов в CSV/Excel, нет
+        импорта. Ручной доступ к sales_agent.db — единственный способ.
+
+  11.3. Авторизация пользователей. Нет проверок «допущен ли этот Telegram id
+        к боту». Любой может вызвать /start и пользоваться поиском/CRM.
+        (Chat Monitor — отдельный случай, он привязан к .env.)
+
+  11.4. Webhook-режим. Только long polling. Нет webhook-хендлера.
+
+  11.5. Очереди задач (celery, RQ и т.д.). Фоновых задач две — поллер
+        напоминаний и Telethon runner, обе через asyncio. Нет retry-очередей.
+
+  11.6. Метрики и мониторинг. Нет Prometheus, нет health-check endpoint,
+        нет трекинга времени ответа LLM или Overpass.
+
+  11.7. Резервное копирование БД. Нет автоматического бэкапа sales_agent.db.
+
+  11.8. Локализация/i18n. Все тексты на русском, хардкод в коде. Нет файла
+        переводов.
+
+  11.9. Темная/светлая тема, кастомизация UI. UI — inline-клавиатуры, без
+        настроек внешнего вида.
+
+  11.10. Полнотекстовый поиск по лидам. Фильтрация по статусу/источнику есть,
+         но поиска по имени/тексту нет.
+
+  11.11. Уведомления о новых chat-лидах в реальном времени. Telethon runner
+         сохраняет лиды в БД, но не отправляет уведомление пользователю.
+         Пользователь узнаёт о новых лидах только открыв «Мои лиды» -> Chat Monitor.
+
+  11.12. Расширение nail-ниши на другие ниши. keywords_nail.py и промпт LLM
+         зашиты на nail-нишу. Другие ниши требуют нового keyword-файла и
+         нового промпта (архитектура позволяет: ChatMessageCandidate.niche,
+         keywords параметр в process_candidate).
+
+  11.13. Alembic-миграции. Только create_all + ALTER TABLE для leads.
+         Новые таблицы/колонки в других таблицах потребуют ручной миграции.
+
+  11.14. Редактирование/удаление лидов. Нельзя удалить лид или отредактировать
+         его поля (кроме статуса и заметки).
+
+  11.15. Управление напоминаниями. Нельзя посмотреть список напоминаний,
+         удалить или перенести. Поллер работает автономно.
+
+  TODO-комментариев в коде нет.
+
+
+================================================================================
+12. ОГРАНИЧЕНИЯ ПРОЕКТА
+================================================================================
+
+Технические ограничения
+
+  12.1. Python 3.11+ обязательно. На 3.10 asyncio.TimeoutError — отдельный
+        класс (не подкласс TimeoutError), что ломало except. В коде
+        Workaround: except (asyncio.TimeoutError, TimeoutError).
+
+  12.2. SQLite — однопользовательская БД. Не подходит для high-concurrency.
+        aiosqlite обёртка поверх синхронного sqlite3 (через поток).
+
+  12.3. Overpass API: бесплатный, без ключей, но с лимитами и непредсказуемой
+        доступностью. MAX_LIMIT=60 результатов. Таймаут 40 секунд.
+
+  12.4. LLM: зависит от провайдера. Бесплатные модели (OpenRouter) медленнее
+        и могут быть перегружены (AIOverloadError). Anthropic — платный.
+
+  12.5. Telethon: требует аккаунт Telegram (не бота). Сессия чувствительная
+        (файл .session). Авторизация по телефону/коду/QR.
+
+  12.6. Кастомные эмодзи требуют премиум-пак Telegram (tgmacicons). Если пак
+        удалён/ID невалиден — fallback на plain-юникод (но менее красиво).
+
+  12.7. Время напоминаний — UTC. Нет конвертации в часовой пояс пользователя.
+
+Архитектурные ограничения
+
+  12.8. Один процесс для бота + один процесс для Telethon runner. Нет
+        микросервисной архитектуры, нет горизонтального масштабирования.
+
+  12.9. session_factory — глобальная (модульный уровень в db.base.py). В
+        тестах подменяется через monkeypatch. Нет dependency injection.
+
+  12.10. LLM-клиент создаётся на каждый вызов get_client() (не переиспользуется).
+         Для Anthropic — создаётся AsyncAnthropic на каждый вызов analyze_company/
+         generate_messages. Неэффективно при высоком трафике.
+
+  12.11. Chat Monitor runner загружает runtime_config из БД на каждое новое
+         сообщение (load_runtime_config). База дёргается на каждое сообщение
+         во всех чатах, даже если они не в списке.
+
+Известные проблемы
+
+  12.12. Соцсети (socials) почти всегда пусты — OSM практически не отдаёт их.
+  12.13. OSM редко отдаёт website для компаний — в карточке часто нет сайта.
+
+  12.14. Город вводится текстом, а не выбором из списка. Ошибки ввода
+         нормализуются (регистр, предлоги), но опечатка в названии = 0 результатов.
+
+  12.15. Бесплатные LLM-модели могут возвращать невалидный JSON или
+         невалидные значения (score > 100, is_solo_master=null). Обработка
+         есть (AIError), но пользователь видит «Не получилось выполнить анализ».
+
+Компромиссы
+
+  12.16. is_sent помечается ДО отправки напоминания (риск дубля при «сообщение
+         дошло, но ответ API оборвался»). Принимается: потеря напоминания хуже
+         дубля для личного бота.
+
+  12.17. Нет Alembic (лёгкая миграция ALTER TABLE вместо). Компромисс: меньше
+         зависимостей и сложности, но неполноценно.
+
+  12.18. LLM-промпты на русском, хардкод. Компромисс: проще для личного бота,
+         нет i18n-инфраструктуры.
+
+  12.19. 2ГИС-ссылки захардкожены на 2gis.kz (Казахстан). Для РФ нужно
+         поменять на 2gis.ru. Автоопределение страны не делается.
+
+
+================================================================================
+13. ПРОИЗВОДИТЕЛЬНОСТЬ
+================================================================================
+
+Потенциальные узкие места
+
+  13.1. LLM-вызовы (analyze_company, generate_messages, score_nail_chat_message)
+        — самые тяжёлые операции. Зависят от провайдера, могут занимать
+        5-60+ секунд. max_tokens=1500. Таймаут 60 сек.
+
+  13.2. Overpass API — внешний сервис, непредсказуемая скорость. Таймаут 40 сек.
+        Лимит 60 результатов. Между запросами в live_walkthrough — sleep(3)
+        (вежливость к Overpass, снижение риска 429).
+
+  13.3. Telethon runner: load_runtime_config на каждое сообщение — запрос к
+        БД. При большом потоке сообщений в чатах может создавать нагрузку.
+
+  13.4. Поллер напоминаний: get_due_reminders выбирает все просроченные за
+        раз. При большом числе напоминаний — потенциально долгая операция.
+        Интервал 60 сек (настраивается).
+
+  13.5. create_async_engine при импорте db.base.py — engine создаётся на
+        уровне модуля. Не ленивый.
+
+Наиболее тяжёлые операции
+
+  13.6. AI-анализ: LLM-вызов + парсинг JSON + сохранение в БД. Обработчики
+        показывают «Анализирую компанию…» или «Генерирую варианты сообщений…».
+
+  13.7. Поиск компаний: HTTP POST к Overpass + парсинг JSON + создание списка
+        Company. Результаты кешируются в FSM (results list).
+
+Возможные проблемы масштабирования
+
+  13.8. SQLite: один писатель, множество читателей. При росте числа
+        одновременных операций (особенно Chat Monitor + бот) возможны блокировки.
+        Решение: переход на PostgreSQL.
+
+  13.9. LLM-клиент создаётся на каждый вызов. Решение: переиспользование
+        клиента (singleton или pool).
+
+  13.10. session_factory — один engine. Решение: pool с connection limit.
+
+  13.11. FSM-данные в памяти (aiogram memory storage по умолчанию). При
+         рестарте — потеря. Решение: Redis/PostgreSQL storage для FSM.
+
+  13.12. Chat Monitor: один Telethon-клиент, один аккаунт. Множественные
+         аккаунты/ниши потребуют архитектурных изменений.
+
+  13.13. Список лидов: ограничен 50 в UI (leads[:50]). При росте числа
+         лидов пагинация в UI не реализована.
+
+
+================================================================================
+14. ТЕСТИРОВАНИЕ
+================================================================================
+
+Фреймворк: pytest 9.1.1 + pytest-asyncio 1.4.0 (asyncio_mode=auto).
+Покрытие: pytest-cov 7.1.0. Фактический счётчик: 205 тестов (pytest --co).
+README указывает 166 — вероятно устарело.
+Конфигурация: pytest.ini (asyncio_mode=auto, testpaths=tests).
+БД в тестах: in-memory SQLite (sqlite+aiosqlite:///:memory:), fresh на каждый тест.
+Внешние сервисы: мокируются (Overpass, Anthropic, OpenAI, Telethon).
+
+Тестовые файлы и что проверяется:
+
+  conftest.py — фикстуры: engine (in-memory SQLite), session_factory, session.
+  fakes.py — FakeMessage, FakeCallback, FakeState, FakeUser (минимальные
+    моки aiogram для прямого вызова хендлеров).
+
+  test_ai.py (16 тестов):
+    — _extract_json: plain, code fence, surrounding text, no object, invalid,
+      non-object.
+    — analyze_company: happy path, has_online_booking (true/false/null/string),
+      invalid JSON, score out of range, score not int, rate limit, API error,
+      timeout, empty response.
+
+  test_ai_provider.py (10 тестов):
+    — get_client: anthropic, openrouter (base_url), unknown provider.
+    — OpenAICompatClient: analyze happy path, generate happy path, rate limit,
+      5xx -> overload, timeout, empty response.
+    — AnthropicClient: 5xx -> overload.
+    — analyze_company(client=None) -> default client from settings.
+
+  test_bot.py (2 теста):
+    — run() чистая остановка по Ctrl+C (KeyboardInterrupt -> лог, код 0).
+    — run() пропускает SystemExit(1) (ненулевой код сохраняется).
+
+  test_chat_monitor.py (5 тестов):
+    — keyword filter: finds nail signal, skips irrelevant.
+    — score_nail_chat_message: parses LLM JSON.
+    — process_candidate: saves relevant chat lead, skips below threshold.
+
+  test_chat_monitor_settings.py (10 тестов):
+    — main menu has chat monitor button.
+    — parse_chat_refs: usernames, ids, links.
+    — parse_min_score validation.
+    — normalize_phone.
+    — repo CRUD: get_or_create, add, set_min_score, toggle, delete.
+    — chat monitor menu shows status.
+    — add chat flow saves refs.
+    — add chat invalid reasks.
+    — threshold flow validates and saves.
+    — delete chat button.
+    — toggle monitor.
+    — event_matches_chat_refs by id and username.
+
+  test_crm.py (14 тестов):
+    — all statuses have labels.
+    — full status lifecycle.
+    — status change scoped by owner.
+    — parse_custom_date: full, date only (10am), invalid variants, whitespace.
+    — format_company_card: hides empty, shows present, escapes HTML.
+    — format_lead_card: with analysis/note, without analysis.
+    — manual_search_links: encode name+city, without city, included in card.
+    — need_score_line: not analyzed, has booking, no booking high/low, unknown.
+
+  test_emoji.py (11 тестов):
+    — no missing IDs, no duplicate keys, all IDs numeric.
+    — emoji renders tg tag, fallback for unknown.
+    — E and P consistent.
+    — strip_custom_emojis: replaces tags, leaves HTML, handles empty.
+    — safe_answer/safe_edit/safe_bot_send: fallback to plain.
+    — safe_answer: no fallback needed.
+
+  test_fixes.py (10 тестов):
+    — /help, unknown command, plain text fallback.
+    — /start clears FSM, existing user returning text.
+    — /cancel active state, /cancel without state.
+    — safe_answer truncates above Telegram limit.
+    — stale search callbacks show alert.
+    — chat monitor card shows source_chat once.
+    — leads chat_monitor filter shows only chat source.
+
+  test_handlers.py (35 тестов):
+    — start/menu: /start registers user, settings, noop, menu clears state.
+    — search: asks city, empty reasks, valid moves to category, unknown slug,
+      overpass down, empty results, success shows card, paginate valid/invalid/
+      stale, save dedup, save out of range.
+    — analysis: success, invalid key, rate limit, lead not found, invalid
+      callback, analyze from search autosaves.
+    — crm: leads empty, invalid filter, list and open card, no_booking filter,
+      change status valid/invalid/foreign, note flow, reminder days valid/
+      invalid, reminder custom date, reminder menu, show leads menu, show lead
+      card invalid/not found, status menu, note start invalid/not found,
+      note received lead deleted, reminder days malformed/non-int/not found,
+      reminder custom start/received, reminder menu invalid.
+    — messages: requires analysis, success escapes HTML, rate limit, edit flow,
+      stale context.
+
+  test_keyboards.py (3 теста):
+    — leads_filter_kb has all and every status, wraps rows by three.
+    — statuses_kb lists all statuses with lead_id.
+
+  test_messages.py (4 теста):
+    — generate_messages happy path, missing variant, invalid JSON, rate limit.
+    — render_variants escapes HTML specials.
+
+  test_places.py (20 тестов):
+    — build_query: city and tags, strips quotes injection.
+    — normalize_city: fixes case (astana), lowercases connectors (rostov-na-donu),
+      keeps non-connector words capitalized, multilingual name keys.
+    — search: astana sends normalized city, rostov sends lowercase connector.
+    — parse_elements: full fields, contact prefixed tags, missing fields,
+      skips unnamed, respects max limit, empty response.
+    — search_companies: happy path, unknown category, propagates error.
+    — _request_overpass: OK, HTTP 4xx, HTTP 5xx, invalid JSON, timeout,
+      network error.
+
+  test_reminders.py (8 тестов):
+    — poll sends due reminders, ignores future and sent, processes multiple,
+      failed send rolls back and retries, second run no duplicate.
+    — loop sends and sleeps, loop survives poll exception.
+
+  test_repo.py (13 тестов):
+    — get_or_create_user: creates, idempotent, updates username.
+    — create and get lead.
+    — get lead scoped by owner.
+    — find by name address dedupe.
+    — list leads with status filter, invalid filter raises.
+    — set lead status valid/invalid/missing.
+    — set lead note.
+    — save lead analysis, persists has_online_booking.
+    — list leads only no booking excludes true and null.
+    — init_db migrates missing column (idempotent).
+    — reminders due and mark sent.
+    — is_valid_status.
+
+Что НЕ проверяется тестами:
+  — Живой Telegram (polling, реальные сообщения). Все хендлеры тестируются
+    прямым вызовом через Fake-объекты.
+  — Реальная сеть Overpass/LLM (мокируется). Есть scripts/live_walkthrough.py
+    и scripts/smoke_llm.py для ручной проверки, но они не часть pytest.
+  — Telethon runner (живой Telegram userbot). Тесты покрывают логику
+    (process_candidate, event_matches_chat_refs, normalize_phone), но не
+    сам runner.
+  — Webhook-режим (не реализован).
+  — Интеграционные тесты с реальной БД (только in-memory SQLite).
+
+
+================================================================================
+15. ВОЗМОЖНОСТИ ДЛЯ РАЗВИТИЯ
+================================================================================
+
+Архитектурно допускают расширение:
+
+  15.1. Новые категории поиска: добавить slug -> (label, tag_key, tag_value)
+        в CATEGORIES (services/places.py) — клавиатура и поиск обновятся
+        автоматически.
+
+  15.2. Новый LLM-провайдер: добавить новый класс-наследник LLMClient с
+        методом _complete() и зарегистрировать в get_client().
+
+  15.3. Новые ниши для Chat Monitor: создать новый keyword-файл (как
+        keywords_nail.py), передать keywords параметр в process_candidate,
+        адаптировать промпт score_nail_chat_message под новую нишу.
+        ChatMessageCandidate.niche уже параметризован.
+
+  15.4. Новые статусы лидов: добавить в LeadStatus enum и STATUS_LABELS dict
+        — клавиатуры, фильтры и валидация обновятся автоматически.
+
+  15.5. Новые источники лидов (кроме OSM и chat_monitor): поле source в Lead
+        уже поддерживает произвольные значения, list_leads принимает source
+        параметр. Потребуется новый handler/keyboard для фильтра.
+
+  15.6. Переход на PostgreSQL: заменить DB_URL, SQLAlchemy async поддерживает.
+        session_factory не изменится. Возможно потребуется Alembic для миграций.
+
+  15.7. FSM storage: заменить memory storage на Redis/PostgreSQL для
+        персистентности FSM-данных между рестартами (aiogram поддерживает).
+
+  15.8. Webhook-режим: aiogram поддерживает, потребует замены start_polling
+        на webhook-хендлер и настроек webserver.
+
+  15.9. Метрики: добавить middleware в Dispatcher для трекинга времени
+        обработки, счётчика callback'ов. aiogram поддерживает middleware.
+
+  15.10. Многопользовательский режим: data scoping уже есть (owner_tg_id).
+         Потребуется: админ-панель, квоты, разделение Chat Monitor по аккаунтам.
+
+  15.11. Пагинация списка лидов: currently capped at 50. Архитектура
+         list_leads поддерживает, потребует UI с пагинацией (как в поиске).
+
+  15.12. Экспорт данных: добавить handler/keyboard для выгрузки лидов в
+         CSV/JSON. Данные в repo.py уже структурированы.
+
+  15.13. Уведомления о новых chat-лидах: runner уже сохраняет лиды; добавить
+         отправку сообщения через Bot API (но bot и runner — разные процессы,
+         потребуется общий доступ к БД + polling/long-poll для уведомлений).
+
+
+================================================================================
+16. ИТОГОВАЯ ОЦЕНКА ПРОЕКТА
+================================================================================
+
+Сильные стороны
+
+  — Чёткая модульная архитектура: каждый слой (db, services, handlers,
+    chat_monitor, utils) имеет ясную ответственность.
+  — Полное покрытие пользовательских сценариев: поиск -> анализ -> генерация
+    -> CRM -> напоминания -> Chat Monitor. Все функции реализованы и работают.
+  — Тщательная обработка ошибок: три класса AI-ошибок, PlacesError,
+    TelegramBadRequest fallback, беззасыпный поллер, чистая остановка.
+  — HTML-безопасность: экранирование всех пользовательских/LLM-данных,
+    санитизация Overpass QL, percent-кодирование URL.
+  — Data ownership scoping: все запросы фильтруются по owner_tg_id.
+  — Переключаемый LLM-провайдер без правки кода (только .env).
+  — Высокое покрытие тестами: 205 тестов (фактически; README указывает 166),
+    in-memory SQLite, моки внешних сервисов, регрессии по QA-фиксам.
+  — Fallback эмодзи: три уровня (HTML -> plain emoji -> plain text).
+  — Дедупликация лидов (OSM и chat_monitor).
+  — Документированный код: docstrings на русском, комментарии с описанием
+    реальных багов и причин решений.
+  — Воспроизводимая установка: requirements-lock.txt с полным деревом.
+  — Лаунчеры run.bat/run.sh для удобного запуска.
+
+Слабые стороны
+
+  — Нет Alembic-миграций (ALTER TABLE workaround для leads, неполноценно
+    для других таблиц).
+  — LLM-клиент создаётся на каждый вызов (неэффективно).
+  — session_factory и engine — глобальные (модульный уровень), нет DI.
+  — Chat Monitor runner дёргает БД на каждое сообщение.
+  — Нет пагинации в списке лидов (cap 50).
+  — Нет экспорта/импорта данных.
+  — Нет удаления/редактирования лидов (кроме статуса и заметки).
+  — Нет управления напоминаниями (просмотр, удаление, перенос).
+  — Время напоминаний в UTC без конвертации.
+  — 2ГИС-домен захардкожен (2gis.kz).
+  — Нет авторизации пользователей (любой может пользоваться).
+  — Нет метрик/мониторинга.
+  — FSM storage в памяти (теряется при рестарте).
+
+Уровень качества архитектуры
+  Средне-высокий. Архитектура модульная, ответственности разделены, паттерны
+  применены осмысленно (Repository, Strategy, Router, FSM). Однако есть
+  глобальные синглтоны (engine, session_factory, settings), нет DI, нет
+  полноценных миграций. Для личного бота — отлично. Для SaaS/продакшена с
+  масштабированием — потребует доработки.
+
+Читаемость
+  Высокая. Код хорошо структурирован, docstrings на русском с описанием
+  контекста, комментарии объясняют почему (а не что). Имена функций и
+  переменных самодокументирующие. Тесты читаемы и описательны.
+
+Поддерживаемость
+  Высокая для разработчика, знающего Python/aiogram. Тесты покрывают
+  регрессии. requirements-lock.txt гарантирует воспроизводимость. Однако:
+  нет миграций, нет метрик, нет документации API (только README). При росте
+  числа функций или пользователей поддерживаемость снизится без
+  рефакторинга.
+
+Расширяемость
+  Хорошая. Категории поиска, LLM-провайдеры, ниши Chat Monitor, статусы
+  лидов — все расширяемы без изменения логики. Архитектура допускает
+  PostgreSQL, webhook, Redis FSM, метрики. Однако: глобальные синглтоны,
+  отсутствие DI и Alembic усложнят крупные изменения. Многопользовательский
+  режим потребует значительного рефакторинга.
+
+================================================================================
+                                КОНЕЦ ФАЙЛА
+================================================================================
