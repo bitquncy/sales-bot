@@ -6,6 +6,7 @@ from html import escape
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
+from sqlalchemy.exc import IntegrityError
 
 from db import repo
 from db.base import session_factory
@@ -153,14 +154,32 @@ async def _ensure_lead_saved(owner_tg_id: int, state: FSMContext, index: int) ->
         existing = await repo.find_lead_by_name_address(
             session, owner_tg_id, company["name"], company.get("address")
         )
-        lead = existing or await repo.create_lead(
-            session,
-            owner_tg_id=owner_tg_id,
-            name=company["name"],
-            address=company.get("address"),
-            phone=company.get("phone"),
-            website=company.get("website"),
-        )
+        if existing is not None:
+            lead = existing
+        else:
+            try:
+                lead = await repo.create_lead(
+                    session,
+                    owner_tg_id=owner_tg_id,
+                    name=company["name"],
+                    address=company.get("address"),
+                    phone=company.get("phone"),
+                    website=company.get("website"),
+                )
+                await repo.log_action(session, owner_tg_id, "lead_saved", lead.id, details="from_search")
+            except IntegrityError:
+                # Гонка дедупликации (gap-2): другой процесс (chat_monitor /
+                # повторный клик) успел вставить того же лида между проверкой и
+                # вставкой, UNIQUE-индекс uq_osm_lead_dedup отклонил дубль.
+                # repo.create_lead обрабатывает это сам — здесь страховка на
+                # случай, если ошибка вырвалась наружу (например, на refresh).
+                await session.rollback()
+                lead = await repo.find_lead_by_name_address(
+                    session, owner_tg_id, company["name"], company.get("address")
+                )
+                if lead is None:
+                    # Конфликт не связан с дедупликацией — пробрасываем выше
+                    raise
     saved[str(index)] = lead.id
     await state.update_data(saved_leads=saved)
     return lead.id

@@ -18,6 +18,7 @@ from keyboards.main_menu import messages_kb
 from services.ai import AIError, AIOverloadError, AIRateLimitError, generate_messages
 from states.fsm import EditMessageFSM
 from utils.emoji_config import E, P
+from utils.idempotency import IdempotencyLock
 from utils.safe_send import safe_answer, safe_edit
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,16 @@ async def generate_for_lead(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer(f"{P.CROSS} Некорректные данные. Попробуй ещё раз.", show_alert=True)
         return
 
+    async with IdempotencyLock("generation", callback.from_user.id, lead_id, ttl=120) as acquired:
+        if not acquired:
+            await callback.answer(f"{E.TIMER} Генерация уже выполняется.", show_alert=True)
+            return
+        await _generate_for_lead_locked(callback, state, lead_id)
+
+
+async def _generate_for_lead_locked(
+    callback: CallbackQuery, state: FSMContext, lead_id: int
+) -> None:
     async with session_factory() as session:
         lead = await repo.get_lead(session, lead_id, callback.from_user.id)
     if lead is None:
@@ -63,7 +74,9 @@ async def generate_for_lead(callback: CallbackQuery, state: FSMContext) -> None:
 
     # P-2: Проверка дневного лимита LLM-вызовов
     async with session_factory() as session:
-        allowed, _count = await repo.check_llm_budget(session, settings.llm_daily_limit)
+        allowed, _count = await repo.check_llm_budget(
+            session, settings.llm_daily_limit, callback.from_user.id, "generation"
+        )
     if not allowed:
         await safe_edit(status, MSG_BUDGET)
         return
@@ -80,6 +93,10 @@ async def generate_for_lead(callback: CallbackQuery, state: FSMContext) -> None:
         logger.error("Message generation failed for lead=%s: %s", lead_id, exc)
         await safe_edit(status, MSG_AI_FAILED)
         return
+
+    # Audit: messages generated successfully
+    async with session_factory() as session:
+        await repo.log_action(session, callback.from_user.id, "messages_generated", lead_id)
 
     await state.update_data(gen_short=short, gen_long=long, gen_lead_id=lead_id, gen_lead_name=lead.name)
     await safe_edit(status, render_variants(lead.name, short, long), reply_markup=messages_kb(lead_id))

@@ -20,6 +20,15 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     bot_token: str = ""
+    port: int = 0
+
+    # --- SEC-FIX-6: Окружение (development / production) ---
+    # В production пустой ALLOWED_USER_IDS становится ОШИБКОЙ запуска (fail-closed):
+    # бот без allowlist доступен любому пользователю Telegram.
+    environment: str = "development"
+    # ISO-8601 timestamp после фактической ротации BOT_TOKEN, LLM key и
+    # Telethon sessions. Обязателен в production после security incident.
+    secrets_rotated_at: str = ""
 
     # --- Выбор LLM-провайдера ---
     # "anthropic" | "openrouter" (или любой другой OpenAI-совместимый провайдер)
@@ -29,17 +38,29 @@ class Settings(BaseSettings):
     llm_model: str = ""
     # base_url для OpenAI-совместимого провайдера (для anthropic не используется).
     llm_base_url: str = "https://openrouter.ai/api/v1"
+    # Comma-separated HTTPS hosts permitted for OpenAI-compatible providers in production.
+    llm_allowed_hosts: str = "openrouter.ai,api.openai.com"
     # Ключ выбранного провайдера. Для anthropic, если пусто, берётся ANTHROPIC_API_KEY.
     llm_api_key: str = ""
     # Таймаут одного запроса к LLM, секунды. Бесплатные модели отвечают
     # медленнее — поэтому значение настраиваемое, а не хардкод на оба провайдера.
     llm_timeout_seconds: float = 60.0
+    llm_retry_attempts: int = 2
+    llm_retry_base_delay_seconds: float = 1.0
 
     # --- Legacy Anthropic (используются, когда llm_provider=anthropic) ---
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-4-5"
 
     db_url: str = "sqlite+aiosqlite:///./sales_agent.db"
+    # Dev: create_all + lightweight SQLite upgrades. Production: False, схема
+    # накатывается только `alembic upgrade head`, бот лишь проверяет её наличие.
+    auto_create_schema: bool = True
+    
+    # --- SECURITY-6: Redis для FSM storage (опционально) ---
+    # Если задан — FSM состояния сохраняются между рестартами.
+    # Формат: redis://localhost:6379/0 или redis://user:pass@host:port/db
+    redis_url: str = ""
 
     # Интервал фонового поллера напоминаний, секунды
     reminders_poll_interval: int = 60
@@ -56,6 +77,14 @@ class Settings(BaseSettings):
     # Comma-separated usernames/ids: @chat_one,-1001234567890
     chat_monitor_chats: str = ""
     chat_monitor_min_score: float = 0.7
+    # --- CHATMON-1: Cooldown на автора, секунды (0 = отключён) ---
+    # Один автор может «съесть» весь LLM-бюджет флудом сообщений с ключевыми
+    # словами. После скоринга сообщения автора следующие его сообщения
+    # пропускаются в течение cooldown (по умолчанию час).
+    chat_monitor_author_cooldown_seconds: int = 3600
+    chat_monitor_queue_size: int = 200
+    chat_monitor_worker_count: int = 2
+    chat_monitor_max_chats: int = 100
 
     # --- P-1: Allowlist пользователей бота ---
     # Comma-separated Telegram user IDs. Пусто = разрешены все (для личного бота).
@@ -64,6 +93,27 @@ class Settings(BaseSettings):
     # --- P-2: Дневной лимит LLM-вызовов (0 = без лимита) ---
     llm_daily_limit: int = 0
 
+    # --- SEC-FIX: общий rate limit всех update-типов на пользователя ---
+    # Старый раздельный лимит message/callback можно было обходить чередованием
+    # типов. Глобальный bucket режет суммарную частоту любых апдейтов.
+    user_global_rate_limit_seconds: float = 0.5
+
+    # --- SEC-FIX: лимит активных напоминаний на пользователя ---
+    max_active_reminders_per_user: int = 100
+    reminders_batch_size: int = 100
+
+    # --- PERF-3: Максимум одновременных LLM-вызовов (защита free-tier API от бурстов) ---
+    # Бот + chat_monitor могут одновременно инициировать вызовы; семафор
+    # ограничивает параллелизм и выстраивает остальных в очередь (backpressure).
+    llm_max_concurrency: int = 3
+
+    # --- Overpass backpressure/cache limits ---
+    overpass_max_concurrency: int = 3
+    overpass_cache_max_entries: int = 500
+    overpass_max_response_bytes: int = 5 * 1024 * 1024
+    external_retry_attempts: int = 2
+    external_retry_base_delay_seconds: float = 0.5
+
     # --- P-4: Heartbeat-мониторинг Chat Monitor ---
     heartbeat_file: str = "chat_monitor.heartbeat"
     heartbeat_interval_minutes: int = 5
@@ -71,6 +121,40 @@ class Settings(BaseSettings):
     # --- P-7: Автобэкап БД ---
     backup_dir: str = "backups"
     backup_keep: int = 14
+    # Fernet-compatible 32-byte base64 key; используется как AES-256-GCM key
+    # для backup-файлов. Должен отличаться от PII_ENCRYPTION_KEY.
+    backup_encryption_key: str = ""
+
+    # --- SEC-FIX-5: Шифрование ПДн в БД (Fernet / AES-128-CBC+HMAC) ---
+    # Ключ шифрования колонок с ПДн (тексты чатов и др.). Пусто = шифрование
+    # ВЫКЛЮЧЕНО (обратная совместимость, данные хранятся открытым текстом).
+    # Сгенерировать: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    # ВАЖНО: без ключа, которым зашифрованы данные, их НЕ расшифровать —
+    # храни ключ отдельно от БД (в .env, не в git). Включение на существующей
+    # БД: прозрачная миграция происходит при сохранении/удалении лида (или
+    # скриптом scripts/encrypt_existing.py).
+    pii_encryption_key: str = ""
+    # Сколько дней хранить журнал LLM-вызовов (нужен только для дневного лимита).
+    retention_llm_call_log_days: int = 30
+    # Сколько дней хранить аудит действий (расследование инцидентов).
+    retention_audit_log_days: int = 90
+    # Сколько дней хранить текст сообщения из чата (ПДн; лид остаётся, текст удаляется).
+    retention_chat_message_text_days: int = 30
+    # Сколько дней хранить soft-deleted лиды до окончательного удаления.
+    retention_deleted_lead_days: int = 30
+    # Интервал фоновой очистки, секунды (по умолчанию раз в сутки).
+    retention_cleanup_interval_seconds: int = 86400
+
+    # --- MONITORING-2: Sentry (опционально) ---
+    # DSN из настроек проекта на sentry.io. Пусто = Sentry отключён,
+    # бот работает как раньше (ошибки только в логах).
+    sentry_dsn: str = ""
+    # Окружение для группировки событий (production / staging / dev)
+    sentry_environment: str = "production"
+    # Доля транзакций для performance-мониторинга (0.0 = только ошибки)
+    sentry_traces_sample_rate: float = 0.0
+    # Отдельная соль для необратимого хеширования Telegram user ID в Sentry.
+    sentry_user_hash_salt: str = ""
 
     # =========================================================================
     # --- Клиентская конфигурация (Production Template) ---

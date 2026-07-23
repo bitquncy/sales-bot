@@ -11,7 +11,7 @@ from html import escape
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from config import settings
-from chat_monitor.filtering import find_keywords
+from chat_monitor.filtering import author_on_cooldown, find_keywords
 from chat_monitor.keywords_nail import KEYWORDS as _DEFAULT_KEYWORDS
 from db import repo
 from db.models import Lead, utcnow
@@ -76,22 +76,67 @@ async def process_candidate(
     if not matched:
         return None
 
+    # Атомарный claim ДО budget/LLM: два monitor-инстанса не скорят одно
+    # Telegram-сообщение дважды.
+    async with session_factory() as session:
+        claimed = await repo.claim_chat_message(
+            session,
+            owner_tg_id,
+            candidate.source_chat,
+            candidate.user_id,
+            candidate.message_id,
+        )
+    if not claimed:
+        return None
+
+    # CHATMON-1: Cooldown на автора — после скоринга его сообщения пропускаем
+    # в течение cooldown, чтобы флуд одного автора не съедал LLM-бюджет.
+    # Проверка ДО бюджета/LLM: пропуск не тратит ни дневной лимит, ни токены.
+    if author_on_cooldown(candidate.user_id, settings.chat_monitor_author_cooldown_seconds):
+        logger.info(
+            "Chat lead skipped by author cooldown: chat=%s user=%s",
+            candidate.source_chat, candidate.user_id,
+        )
+        return None
+
     # P-2: Проверка дневного лимита LLM-вызовов
     async with session_factory() as session:
-        allowed, count = await repo.check_llm_budget(session, settings.llm_daily_limit)
+        allowed, count = await repo.check_llm_budget(
+            session, settings.llm_daily_limit, owner_tg_id, "chat_score"
+        )
     if not allowed:
         logger.warning(
             "LLM daily limit reached (%d/%d), skipping chat message scoring: chat=%s user=%s",
             count, settings.llm_daily_limit, candidate.source_chat, candidate.user_id,
         )
+        async with session_factory() as session:
+            await repo.release_chat_message_claim(
+                session,
+                owner_tg_id,
+                candidate.source_chat,
+                candidate.user_id,
+                candidate.message_id,
+            )
         return None
 
-    score, reasoning, is_solo_master = await score_nail_chat_message(
-        candidate.message_text,
-        username=candidate.username,
-        source_chat=candidate.source_chat,
-        client=llm_client,
-    )
+    try:
+        score, reasoning, is_solo_master = await score_nail_chat_message(
+            candidate.message_text,
+            username=candidate.username,
+            source_chat=candidate.source_chat,
+            client=llm_client,
+        )
+    except Exception:
+        # Временный сбой LLM не должен навсегда блокировать retry сообщения.
+        async with session_factory() as session:
+            await repo.release_chat_message_claim(
+                session,
+                owner_tg_id,
+                candidate.source_chat,
+                candidate.user_id,
+                candidate.message_id,
+            )
+        raise
     if score < min_score:
         logger.info(
             "Chat lead skipped by score: score=%.3f min=%.3f chat=%s user=%s",

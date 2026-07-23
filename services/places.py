@@ -6,9 +6,12 @@
 """
 
 import asyncio
+import email.utils
+import json
 import logging
 import re
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 
 import aiohttp
@@ -23,7 +26,22 @@ REQUEST_TIMEOUT_SECONDS = 40
 CACHE_TTL_SECONDS = 1800  # 30 минут
 
 # Простой in-memory кэш: ключ -> (timestamp, результат)
-_overpass_cache: dict[str, tuple[float, list]] = {}
+_overpass_cache: OrderedDict[str, tuple[float, list]] = OrderedDict()
+_inflight: dict[str, asyncio.Task] = {}
+_inflight_lock = asyncio.Lock()
+_request_semaphore: asyncio.Semaphore | None = None
+_request_semaphore_loop = None
+
+
+def _get_request_semaphore() -> asyncio.Semaphore:
+    global _request_semaphore, _request_semaphore_loop
+    loop = asyncio.get_running_loop()
+    if _request_semaphore is None or _request_semaphore_loop is not loop:
+        from config import settings
+
+        _request_semaphore = asyncio.Semaphore(max(1, settings.overpass_max_concurrency))
+        _request_semaphore_loop = loop
+    return _request_semaphore
 
 # Категории бизнеса -> OSM-теги (key, value)
 CATEGORIES: dict[str, tuple[str, str, str]] = {
@@ -72,6 +90,12 @@ def _sanitize_ql(value: str) -> str:
                   "абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ"
                   "0123456789 -.'()")
     return "".join(ch for ch in value if ch in allowed)
+
+
+class _RetryablePlacesError(Exception):
+    def __init__(self, status: int, delay: float | None = None):
+        self.status = status
+        self.delay = delay
 
 
 # Служебные слова, которые OSM держит в НИЖНЕМ регистре внутри составных
@@ -183,25 +207,64 @@ def parse_elements(data: dict) -> list[Company]:
 
 
 async def _request_overpass(query: str) -> dict:
+    from config import settings
+
     timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
+    attempts = max(1, settings.external_retry_attempts + 1)
+    for attempt in range(attempts):
+        try:
+            async with _get_request_semaphore():
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(OVERPASS_URL, data={"data": query}) as resp:
+                        if resp.status >= 400:
+                            if resp.status < 500 or resp.status == 501:
+                                raise PlacesError(f"Overpass HTTP {resp.status}")
+                            raise _RetryablePlacesError(resp.status, _retry_after(resp))
+                        length = getattr(resp, "content_length", None)
+                        if length is not None and length > settings.overpass_max_response_bytes:
+                            raise PlacesError("Overpass response too large")
+                        content = getattr(resp, "content", None)
+                        if content is None:
+                            parsed = await resp.json(content_type=None)
+                        else:
+                            body = await content.read(settings.overpass_max_response_bytes + 1)
+                            if len(body) > settings.overpass_max_response_bytes:
+                                raise PlacesError("Overpass response too large")
+                            parsed = json.loads(body)
+                        if not isinstance(parsed, dict):
+                            raise ValueError("JSON root is not an object")
+                        return parsed
+        except _RetryablePlacesError as exc:
+            if attempt + 1 >= attempts:
+                raise PlacesError(f"Overpass HTTP {exc.status}") from exc
+            await asyncio.sleep(
+                exc.delay if exc.delay is not None
+                else settings.external_retry_base_delay_seconds * (2 ** attempt)
+            )
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            if attempt + 1 >= attempts:
+                raise PlacesError("Overpass request timed out") from exc
+            await asyncio.sleep(settings.external_retry_base_delay_seconds * (2 ** attempt))
+        except aiohttp.ClientError as exc:
+            if attempt + 1 >= attempts:
+                raise PlacesError(f"Overpass network error: {exc}") from exc
+            await asyncio.sleep(settings.external_retry_base_delay_seconds * (2 ** attempt))
+        except ValueError as exc:
+            raise PlacesError(f"Overpass returned invalid JSON: {exc}") from exc
+    raise PlacesError("Overpass request failed after retries")
+
+
+def _retry_after(response) -> float | None:
+    value = getattr(response, "headers", {}).get("Retry-After")
+    if not value:
+        return None
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(OVERPASS_URL, data={"data": query}) as resp:
-                if resp.status >= 400:
-                    raise PlacesError(f"Overpass HTTP {resp.status}")
-                try:
-                    return await resp.json(content_type=None)
-                except Exception as exc:
-                    raise PlacesError(f"Overpass returned invalid JSON: {exc}") from exc
-    except PlacesError:
-        raise
-    except (asyncio.TimeoutError, TimeoutError) as exc:
-        # aiohttp по total-таймауту бросает asyncio.TimeoutError. На Python 3.10
-        # это отдельный класс (не подкласс встроенного TimeoutError), поэтому
-        # ловим оба явно — работает и на 3.10, и на 3.11+ (где это алиас).
-        raise PlacesError("Overpass request timed out") from exc
-    except aiohttp.ClientError as exc:
-        raise PlacesError(f"Overpass network error: {exc}") from exc
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        try:
+            return max(0.0, email.utils.parsedate_to_datetime(value).timestamp() - time.time())
+        except (TypeError, ValueError, OverflowError):
+            return None
 
 
 async def search_companies(city: str, category_slug: str) -> list[Company]:
@@ -219,16 +282,32 @@ async def search_companies(city: str, category_slug: str) -> list[Company]:
     if cache_key in _overpass_cache:
         cached_at, cached_result = _overpass_cache[cache_key]
         if now - cached_at < CACHE_TTL_SECONDS:
+            _overpass_cache.move_to_end(cache_key)
             logger.debug("Overpass cache hit: city=%r category=%r", city, category_slug)
             return cached_result
+        del _overpass_cache[cache_key]
 
     _, tag_key, tag_value = CATEGORIES[category_slug]
-    query = build_query(city, tag_key, tag_value)
+    async with _inflight_lock:
+        task = _inflight.get(cache_key)
+        if task is None:
+            query = build_query(city, tag_key, tag_value)
+            task = asyncio.create_task(_request_overpass(query))
+            _inflight[cache_key] = task
     try:
-        data = await _request_overpass(query)
+        data = await task
     except PlacesError as exc:
         logger.error("Overpass search failed for city=%r category=%r: %s", city, category_slug, exc)
         raise
+    finally:
+        async with _inflight_lock:
+            if _inflight.get(cache_key) is task:
+                _inflight.pop(cache_key, None)
     result = parse_elements(data)
-    _overpass_cache[cache_key] = (now, result)
+    _overpass_cache[cache_key] = (time.monotonic(), result)
+    _overpass_cache.move_to_end(cache_key)
+    from config import settings
+
+    while len(_overpass_cache) > settings.overpass_cache_max_entries:
+        _overpass_cache.popitem(last=False)
     return result

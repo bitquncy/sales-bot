@@ -5,6 +5,7 @@
 """
 
 import logging
+import asyncio
 
 import aiohttp
 
@@ -36,17 +37,48 @@ async def send_bot_message(
         "text": text[:4096],
         "parse_mode": parse_mode,
     }
+    from config import settings
+
+    attempts = max(1, settings.external_retry_attempts + 1)
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status != 200:
-                    body = await resp.text()
-                    logger.error(
-                        "Bot API sendMessage failed (HTTP %s) token=%s chat_id=%s: %s",
-                        resp.status, _mask_token(bot_token), chat_id, body[:200],
+            for attempt in range(attempts):
+                try:
+                    async with session.post(
+                        url, json=payload, timeout=aiohttp.ClientTimeout(total=15)
+                    ) as resp:
+                        if resp.status == 200:
+                            return True
+                        if resp.status < 500 and resp.status != 429:
+                            body = await resp.text()
+                            logger.error(
+                                "Bot API sendMessage failed (HTTP %s) token=%s chat_id=%s: %s",
+                                resp.status, _mask_token(bot_token), chat_id, body[:200],
+                            )
+                            return False
+                        if attempt + 1 >= attempts:
+                            logger.error(
+                                "Bot API sendMessage exhausted retries (HTTP %s) chat_id=%s",
+                                resp.status, chat_id,
+                            )
+                            return False
+                        retry_after = resp.headers.get("Retry-After")
+                        try:
+                            delay = max(0.0, float(retry_after)) if retry_after else None
+                        except ValueError:
+                            delay = None
+                        await asyncio.sleep(
+                            delay if delay is not None else
+                            settings.external_retry_base_delay_seconds * (2 ** attempt)
+                        )
+                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    if attempt + 1 >= attempts:
+                        logger.error("Bot API sendMessage error (chat_id=%s): %s", chat_id, exc)
+                        return False
+                    await asyncio.sleep(
+                        settings.external_retry_base_delay_seconds * (2 ** attempt)
                     )
-                    return False
-                return True
     except Exception as exc:
-        logger.error("Bot API sendMessage error (chat_id=%s): %s", chat_id, exc)
+        logger.error("Bot API sendMessage setup error (chat_id=%s): %s", chat_id, exc)
         return False
+    return False

@@ -219,6 +219,34 @@ async def test_openai_compat_timeout_maps_to_ai_error():
         await client.analyze_company("X")
 
 
+async def test_openai_compat_transient_error_is_retried(monkeypatch):
+    import openai
+    import httpx
+
+    monkeypatch.setattr(settings, "llm_retry_attempts", 1)
+    request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+    transient = openai.APIConnectionError(request=request)
+    payload = {"score": 40, "weaknesses": [], "offer": "x", "has_online_booking": None}
+
+    class RetrySDK:
+        def __init__(self):
+            self.calls = 0
+            self.chat = type("Chat", (), {})()
+            self.chat.completions = type("Completions", (), {"create": self.create})()
+
+        async def create(self, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise transient
+            return _FakeChatResponse(json.dumps(payload))
+
+    sdk = RetrySDK()
+    client = OpenAICompatClient(sdk_client=sdk)
+    score, _, _ = await client.analyze_company("X")
+    assert score == 40
+    assert sdk.calls == 2
+
+
 async def test_openai_compat_empty_response_raises():
     sdk = FakeOpenAISDK(response_text="")
     client = OpenAICompatClient(sdk_client=sdk)

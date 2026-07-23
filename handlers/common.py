@@ -1,5 +1,9 @@
 """Глобальные команды и fallback-хендлеры."""
 
+import logging
+import time
+from datetime import datetime, timezone
+
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -16,6 +20,11 @@ from utils.safe_send import safe_answer
 commands_router = Router(name="commands")
 fallback_router = Router(name="fallback")
 
+logger = logging.getLogger(__name__)
+
+# Время старта бота (для расчета uptime)
+_bot_start_time = time.time()
+
 STATS_HELP_LINE = "/stats — статистика лидов и AI-расходов\n"
 
 HELP_TEXT = (
@@ -25,6 +34,7 @@ HELP_TEXT = (
     "/start — открыть главное меню\n"
     "/help — показать эту подсказку\n"
     "/stats — статистика лидов и AI-расходов\n"
+    "/health — проверка состояния бота\n"
     "/cancel — отменить текущий сценарий\n\n"
     "Основные действия доступны кнопками в меню."
 )
@@ -40,6 +50,61 @@ STALE_SEARCH_CARD_TEXT = "Эта карточка устарела, начнит
 @commands_router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
     await safe_answer(message, HELP_TEXT, reply_markup=main_menu_kb())
+
+
+@commands_router.message(Command("health"))
+async def cmd_health(message: Message) -> None:
+    """Проверка состояния бота (MONITORING-2).
+    
+    Показывает:
+    - Uptime (время работы)
+    - Статус БД
+    - Статус Redis (если настроен)
+    - Базовые метрики
+    """
+    lines = [f"<b>{E.CHECK} Health Check</b>\n"]
+    
+    # Uptime
+    uptime_seconds = time.time() - _bot_start_time
+    uptime_hours = int(uptime_seconds // 3600)
+    uptime_minutes = int((uptime_seconds % 3600) // 60)
+    lines.append(f"<b>Uptime:</b> {uptime_hours}ч {uptime_minutes}м")
+    
+    # БД connectivity
+    try:
+        async with session_factory() as session:
+            count = await repo.count_today_llm_calls(session, message.from_user.id)
+        lines.append(f"<b>База данных:</b> {E.CHECK} OK")
+        lines.append(f"  • LLM вызовов сегодня: {count}")
+    except Exception as exc:
+        # SEC-FIX: юзеру — только факт ошибки, без деталей (путь/запрос/схема).
+        # Подробности — в лог, а не в чат.
+        logger.error("Health check: DB error: %s", exc)
+        lines.append(f"<b>База данных:</b> {E.CROSS} ERROR")
+    
+    # Redis status
+    if settings.redis_url:
+        try:
+            from redis.asyncio import Redis
+            redis = Redis.from_url(settings.redis_url, decode_responses=True)
+            await redis.ping()
+            lines.append(f"<b>Redis:</b> {E.CHECK} Connected")
+            await redis.close()
+        except Exception:
+            lines.append(f"<b>Redis:</b> {E.CROSS} Unavailable")
+    else:
+        lines.append("<b>Redis:</b> Not configured")
+    
+    # LLM Provider
+    lines.append(f"\n<b>LLM Provider:</b> {settings.llm_provider}")
+    if settings.llm_daily_limit > 0:
+        lines.append(f"<b>Daily Limit:</b> {settings.llm_daily_limit}")
+    
+    # Timestamp
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    lines.append(f"\n<b>Timestamp (UTC):</b> {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    await safe_answer(message, "\n".join(lines))
 
 
 @commands_router.message(Command("stats"))
@@ -82,6 +147,17 @@ async def cmd_stats(message: Message) -> None:
 
     # Напоминания
     lines.append(f"<b>Активных напоминаний:</b> {stats['pending_reminders']}")
+
+    # Воронка (AD-2): поиск → сохранение → анализ → сообщение → статус
+    async with session_factory() as session:
+        funnel = await repo.get_funnel(session, message.from_user.id)
+    if funnel["total"] > 0:
+        lines.append("\n<b>Воронка:</b>")
+        lines.append(f"  • Найдено: {funnel['total']}")
+        lines.append(f"  • С контактами: {funnel['saved']} ({funnel['save_rate']}%)")
+        lines.append(f"  • Проанализировано: {funnel['analyzed']} ({funnel['analyze_rate']}%)")
+        lines.append(f"  • Продвинуто по статусу: {funnel['advanced']} ({funnel['advance_rate']}%)")
+        lines.append(f"  • Общая конверсия: {funnel['overall_rate']}%")
 
     await safe_answer(message, "\n".join(lines), reply_markup=main_menu_kb())
 

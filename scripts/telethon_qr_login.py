@@ -8,6 +8,7 @@
 """
 
 import asyncio
+import getpass
 import logging
 import os
 import sys
@@ -22,6 +23,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from config import settings  # noqa: E402
+from utils.file_perms import restrict_file_permissions  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -72,12 +74,13 @@ async def main() -> None:
         try:
             await qr.wait(timeout=120)
         except SessionPasswordNeededError:
-            password = input("Two-step verification password: ")
+            password = getpass.getpass("Two-step verification password: ")
             await client.sign_in(password=password)
 
         if await client.is_user_authorized():
             me = await client.get_me()
             logger.info("QR login successful: user_id=%s username=%s", me.id, me.username)
+            restrict_file_permissions(settings.chat_monitor_session_path)
             try:
                 QR_PATH.unlink(missing_ok=True)
             except Exception:
@@ -85,6 +88,10 @@ async def main() -> None:
         else:
             logger.error("QR login finished but session is not authorized")
     finally:
+        try:
+            QR_PATH.unlink(missing_ok=True)
+        except Exception:
+            pass
         await client.disconnect()
 
 

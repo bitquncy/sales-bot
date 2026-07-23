@@ -18,8 +18,8 @@ sudo systemctl daemon-reload
 # Основной бот
 sudo systemctl enable --now sales-bot.service
 
-# Chat Monitor (только если настроен Telethon в .env)
-sudo systemctl enable --now sales-chat-monitor.service
+# Chat Monitor запускается ВНУТРИ sales-bot.service. Отдельный unit запрещён:
+# два процесса с одной Telethon session создают дубли и повреждают session-файл.
 
 # Автобэкап БД (раз в сутки в 03:00)
 sudo systemctl enable --now sales-backup.timer
@@ -33,11 +33,9 @@ sudo systemctl enable --now sales-heartbeat.timer
 ```bash
 # Статус
 sudo systemctl status sales-bot.service
-sudo systemctl status sales-chat-monitor.service
 
 # Логи
 sudo journalctl -u sales-bot.service -f
-sudo journalctl -u sales-chat-monitor.service -f
 
 # Перезапуск
 sudo systemctl restart sales-bot.service
@@ -54,6 +52,6 @@ sudo systemctl start sales-heartbeat.service
 Для Windows используй `run.bat` или настрой задачи через Task Scheduler:
 
 - **Бот:** `venv\Scripts\python.exe bot.py` — при входе в систему, перезапуск при сбое
-- **Chat Monitor:** `venv\Scripts\python.exe -m chat_monitor.runner`
+- **Chat Monitor:** отдельную задачу НЕ создавать; он запускается внутри `bot.py`
 - **Бэкап:** `venv\Scripts\python.exe -m scripts.backup_db` — ежедневно в 03:00
 - **Heartbeat:** `venv\Scripts\python.exe -m scripts.check_heartbeat` — каждый час

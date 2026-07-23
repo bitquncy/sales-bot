@@ -81,7 +81,6 @@ install_unit() {
 # ── Установка unit-файлов ─────────────────────────────────────────────────────
 echo "Устанавливаем unit-файлы..."
 install_unit "sales-bot.service"
-install_unit "sales-chat-monitor.service"
 install_unit "sales-backup.service"
 install_unit "sales-backup.timer"
 install_unit "sales-heartbeat.service"
@@ -110,8 +109,7 @@ sudo systemctl enable --now sales-heartbeat.timer
 echo "  ✅ sales-heartbeat.timer (проверка heartbeat каждый час)"
 
 echo ""
-echo "Chat Monitor (только если настроен Telethon в .env):"
-echo "  sudo systemctl enable --now sales-chat-monitor.service"
+echo "Chat Monitor запускается внутри sales-bot.service при полном CHAT_MONITOR_* конфиге."
 
 echo ""
 echo "═══════════════════════════════════════════════════════════"

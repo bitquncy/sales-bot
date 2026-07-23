@@ -6,6 +6,23 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from db.base import Base, _set_sqlite_pragma
 from db import models  # noqa: F401  (регистрация моделей в metadata)
+from services import llm_cache
+from chat_monitor import filtering
+
+
+@pytest.fixture(autouse=True)
+def _reset_global_caches():
+    """Сброс глобального состояния между тестами.
+
+    llm_cache и author cooldown — глобальные in-memory структуры: без сброса
+    один тест (например, успешный анализ «Барбершоп») влиял бы на следующий
+    (тот же лид получил бы кэш-попадание вместо вызова мока).
+    """
+    llm_cache.reset_cache()
+    filtering.reset_author_cooldowns()
+    yield
+    llm_cache.reset_cache()
+    filtering.reset_author_cooldowns()
 
 
 @pytest.fixture

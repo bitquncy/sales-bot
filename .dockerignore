@@ -1,6 +1,8 @@
 # Version control
 .git
 .gitignore
+.claude/
+.kimchi/
 
 # Python cache
 __pycache__
@@ -40,6 +42,21 @@ scripts/telethon_qr_login.py
 
 # Deploy configs (не нужны внутри контейнера)
 deploy/
+
+# Secrets (КРИТИЧНО: никогда не запекать в образ)
+# .env содержит BOT_TOKEN, API-ключи и др. — в контейнер попадает через env_file в docker-compose.yml
+.env
+.env.*
+!.env.example
+# Telethon-сессия — по сути ключ от аккаунта
+*.session
+*.session-journal
+chat_monitor.session*
+*.journal
+*.heartbeat
+# Локальная SQLite-БД (данные монтируются как том, см. ниже)
+sales_agent.db
+*.db
 
 # Runtime data (монтируется как том)
 *.db

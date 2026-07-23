@@ -241,6 +241,44 @@ async def test_list_leads_filtered_ignores_export_filter(session):
     assert not is_valid_status("export")
 
 
+async def test_bot_api_retries_transient_failure(monkeypatch):
+    from utils import bot_api
+
+    class Response:
+        status = 503
+        headers = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Session:
+        calls = 0
+
+        def post(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return Response()
+            response = Response()
+            response.status = 200
+            return response
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    session = Session()
+    monkeypatch.setattr(bot_api.aiohttp, "ClientSession", lambda: session)
+    monkeypatch.setattr("config.settings.external_retry_attempts", 1)
+    monkeypatch.setattr("config.settings.external_retry_base_delay_seconds", 0)
+    assert await bot_api.send_bot_message("token", 1, "hello") is True
+    assert session.calls == 2
+
+
 # ---------- C-4: валидация длины ввода ----------
 
 def test_city_max_length():

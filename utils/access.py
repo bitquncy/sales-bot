@@ -9,6 +9,7 @@ from aiogram.types import TelegramObject
 
 from config import settings
 from utils.emoji_config import E
+from utils import redis_client
 
 NOT_ALLOWED_TEXT = (
     f"{E.CROSS} У вас нет доступа к этому боту. "
@@ -35,7 +36,16 @@ class AllowlistMiddleware(BaseMiddleware):
             # Для CallbackQuery event.message — исходное сообщение,
             # для Message event.message не существует -> используем сам event.
             message = getattr(event, "message", None) or event
-            if hasattr(message, "answer"):
+            should_reply = True
+            redis = await redis_client.get_redis()
+            if redis:
+                try:
+                    should_reply = bool(await redis.set(
+                        f"deny-notice:{user.id}", "1", nx=True, ex=60
+                    ))
+                except Exception:
+                    should_reply = False
+            if should_reply and hasattr(message, "answer"):
                 try:
                     await message.answer(NOT_ALLOWED_TEXT)
                 except Exception:

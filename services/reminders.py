@@ -14,9 +14,11 @@ import asyncio
 import logging
 from html import escape
 
+from config import settings
 from db import repo
 from utils.emoji_config import E
 from utils.safe_send import safe_bot_send
+from utils.sentry import capture_exception
 
 logger = logging.getLogger(__name__)
 
@@ -29,10 +31,10 @@ async def poll_reminders_once(bot, session_factory) -> int:
     """
     processed = 0
     async with session_factory() as session:
-        due = await repo.get_due_reminders(session)
+        due = await repo.claim_due_reminders(
+            session, limit=settings.reminders_batch_size
+        )
         for reminder in due:
-            # Сначала помечаем отправленным, потом шлём (защита от дублей при рестарте).
-            await repo.mark_reminder_sent(session, reminder.id)
             processed += 1
 
             # Лид уже предзагружен через selectinload — нет дополнительного запроса
@@ -56,10 +58,29 @@ async def poll_reminders_once(bot, session_factory) -> int:
 
 
 async def reminders_loop(bot, session_factory, interval_seconds: int = 60) -> None:
-    """Бесконечный цикл поллера. Любая ошибка логируется, цикл не умирает."""
-    while True:
-        try:
-            await poll_reminders_once(bot, session_factory)
-        except Exception as exc:
-            logger.error("Reminders poll iteration failed: %s", exc)
-        await asyncio.sleep(interval_seconds)
+    """Бесконечный цикл поллера с поддержкой graceful shutdown.
+    
+    При отмене (asyncio.CancelledError) завершает текущую итерацию и выходит.
+    Любая ошибка логируется, цикл не умирает.
+    """
+    logger.info("Reminders loop started (interval=%s sec)", interval_seconds)
+    try:
+        while True:
+            try:
+                count = await poll_reminders_once(bot, session_factory)
+                if count > 0:
+                    logger.debug("Sent %s reminder(s)", count)
+            except Exception as exc:
+                logger.error("Reminders poll iteration failed: %s", exc)
+                # MONITORING-2: сбой фонового цикла — в Sentry (no-op если не настроен)
+                capture_exception(exc)
+            
+            try:
+                await asyncio.sleep(interval_seconds)
+            except asyncio.CancelledError:
+                # Graceful shutdown: завершаем цикл без ошибки
+                logger.info("Reminders loop cancelled, shutting down gracefully")
+                raise
+    except asyncio.CancelledError:
+        logger.info("Reminders loop stopped")
+        raise

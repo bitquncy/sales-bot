@@ -3,10 +3,11 @@
 import enum
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from db.base import Base
+from utils.crypto import EncryptedText
 
 
 def utcnow() -> datetime:
@@ -73,11 +74,13 @@ class Lead(Base):
     chat_username: Mapped[str | None] = mapped_column(String(255), nullable=True)
     chat_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
     chat_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
-    message_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    message_text: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)
     message_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     relevance_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     status: Mapped[str] = mapped_column(String(16), default=LeadStatus.new.value, index=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Soft-delete: не null = лид удалён (в CRM не показывается, но данные не теряются)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
 
@@ -87,10 +90,30 @@ class Lead(Base):
     )
 
     # Составной индекс для быстрой дедупликации chat-лидов (DB-2)
+    # UNIQUE constraint предотвращает дубликаты при concurrent runner (P-4)
     __table_args__ = (
         Index(
             "ix_chat_lead_dedup",
             "owner_tg_id", "source_chat", "chat_user_id", "chat_message_id",
+        ),
+        UniqueConstraint(
+            "owner_tg_id", "source_chat", "chat_user_id", "chat_message_id",
+            name="uq_chat_lead_dedup",
+        ),
+        # gap-2: дедупликация OSM-лидов на уровне БД (гонка конкурентной вставки).
+        # Частичный индекс только для source='osm': chat-лиды одного пользователя
+        # из одного чата имеют одинаковые name/address и не должны конфликтовать.
+        # COALESCE по address: NULL-ы в SQLite-индексах считаются различными,
+        # без нормализации дубли с пустым адресом проскочили бы constraint.
+        # Soft-deleted строки входят в индекс — консистентно с кодовой дедупликацией
+        # find_lead_by_name_address (она тоже не фильтрует deleted_at).
+        # *_where указаны для обоих диалектов: SQLite и PostgreSQL.
+        Index(
+            "uq_osm_lead_dedup",
+            "owner_tg_id", "name", func.coalesce(address, ""),
+            unique=True,
+            sqlite_where=text("source = 'osm'"),
+            postgresql_where=text("source = 'osm'"),
         ),
     )
 
@@ -114,6 +137,8 @@ class LLMCallLog(Base):
     __tablename__ = "llm_call_log"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    owner_tg_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    operation: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=utcnow, index=True)
 
 
@@ -129,3 +154,41 @@ class ChatMonitorSettings(Base):
     min_score: Mapped[float] = mapped_column(Float, default=0.7)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
+
+
+class ChatMessageInbox(Base):
+    """Atomic claim/dedup before expensive Chat Monitor LLM scoring."""
+
+    __tablename__ = "chat_message_inbox"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    owner_tg_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    source_chat: Mapped[str] = mapped_column(String(500))
+    chat_user_id: Mapped[int] = mapped_column(BigInteger)
+    chat_message_id: Mapped[int] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow, index=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_tg_id", "source_chat", "chat_user_id", "chat_message_id",
+            name="uq_chat_message_inbox",
+        ),
+    )
+
+
+class AuditLog(Base):
+    """Журнал действий пользователя (AUDIT-1).
+
+    Кто/когда/что сделал: смена статуса, удаление, экспорт и т.п. Нужен для
+    расследования инцидентов и понимания воронки действий. Пишется best-effort
+    (repo.log_action): сбой аудита не должен ломать бизнес-операцию.
+    """
+
+    __tablename__ = "audit_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    owner_tg_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    action: Mapped[str] = mapped_column(String(50), index=True)
+    lead_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    details: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow, index=True)

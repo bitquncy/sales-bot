@@ -287,11 +287,16 @@ async def test_get_stats_uses_group_by(session):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CODE-1: каскадное удаление
+# CODE-1 / P-8: удаление лида (soft-delete) и каскад при hard-delete
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def test_delete_lead_cascades_reminders(session_factory):
-    """Удаление лида автоматически удаляет связанные напоминания (CODE-1)."""
+async def test_delete_lead_soft_deletes_and_keeps_reminders(session_factory):
+    """delete_lead делает soft-delete: лид скрыт из CRM, данные сохраняются.
+
+    Дизайн (P-8): удаление — обратимая операция. Напоминания НЕ удаляются
+    намеренно, чтобы restore_lead возвращал лида целиком, вместе с расписанием
+    follow-up. Hard-delete с каскадом (CODE-1) остаётся для полной очистки.
+    """
     async with session_factory() as session:
         lead = await repo.create_lead(session, OWNER, "Lead with reminders")
         lead_id = lead.id
@@ -303,15 +308,49 @@ async def test_delete_lead_cascades_reminders(session_factory):
         deleted = await repo.delete_lead(session, lead_id, OWNER)
         assert deleted is True
 
-    # Проверяем в новой сессии — лид и напоминания удалены
+    # Проверяем в новой сессии: лид скрыт, но физически на месте
     async with session_factory() as session:
         assert await repo.get_lead(session, lead_id, OWNER) is None
 
+        ghost = await repo.get_lead(session, lead_id, OWNER, include_deleted=True)
+        assert ghost is not None
+        assert ghost.deleted_at is not None
+
+        # Напоминания намеренно сохранены — восстановятся вместе с лидом
         from sqlalchemy import select
         from db.models import Reminder
         result = await session.execute(
             select(Reminder).where(Reminder.id.in_([r1_id, r2_id]))
         )
+        assert len(result.scalars().all()) == 2
+
+        # restore возвращает лида в CRM вместе с напоминаниями
+        restored = await repo.restore_lead(session, lead_id, OWNER)
+        assert restored is not None
+        assert restored.deleted_at is None
+        assert len(await repo.list_reminders_for_lead(session, lead_id, OWNER)) == 2
+
+
+async def test_hard_delete_lead_cascades_reminders(session_factory):
+    """Полное удаление лида (session.delete) каскадно удаляет напоминания (CODE-1)."""
+    async with session_factory() as session:
+        lead = await repo.create_lead(session, OWNER, "Lead for hard delete")
+        lead_id = lead.id
+        r = await repo.create_reminder(session, lead.id, OWNER, utcnow() + timedelta(days=1), "r")
+        r_id = r.id
+
+    async with session_factory() as session:
+        lead = await repo.get_lead(session, lead_id, OWNER)
+        await session.delete(lead)
+        await session.commit()
+
+    # Проверяем в новой сессии — лид и напоминания удалены каскадом
+    async with session_factory() as session:
+        assert await repo.get_lead(session, lead_id, OWNER) is None
+
+        from sqlalchemy import select
+        from db.models import Reminder
+        result = await session.execute(select(Reminder).where(Reminder.id == r_id))
         assert result.scalars().all() == []
 
 

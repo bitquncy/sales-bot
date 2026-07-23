@@ -13,6 +13,8 @@ __pycache__/
 
 # Секреты и локальная конфигурация
 .env
+.env.*
+!.env.example
 
 # База данных SQLite
 *.db
@@ -20,6 +22,17 @@ __pycache__/
 *.sqlite3
 *.session
 *.session-journal
+*.db-wal
+*.db-shm
+chat_monitor_qr.png
+
+# Архивы могут обходить ignore-правила и содержать .env/session/DB
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.tgz
 
 # Heartbeat-файл Chat Monitor
 chat_monitor.heartbeat
@@ -35,5 +48,7 @@ htmlcov/
 # IDE / ОС
 .idea/
 .vscode/
+.claude/
+.kimchi/
 .DS_Store
 Thumbs.db

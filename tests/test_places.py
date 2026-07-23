@@ -213,10 +213,11 @@ async def test_search_companies_propagates_places_error(monkeypatch):
 # ---------- _request_overpass (с фейковым aiohttp) ----------
 
 class FakeResponse:
-    def __init__(self, status=200, json_data=None, json_exc=None):
+    def __init__(self, status=200, json_data=None, json_exc=None, headers=None):
         self.status = status
         self._json_data = json_data
         self._json_exc = json_exc
+        self.headers = headers or {}
 
     async def json(self, content_type=None):
         if self._json_exc:
@@ -287,3 +288,40 @@ async def test_request_overpass_network_error(monkeypatch):
     _patch_session(monkeypatch, post_exc=aiohttp.ClientConnectionError("refused"))
     with pytest.raises(PlacesError, match="network error"):
         await places._request_overpass("query")
+
+
+async def test_request_overpass_retries_transient_5xx(monkeypatch):
+    responses = iter([
+        FakeResponse(503),
+        FakeResponse(200, {"elements": []}),
+    ])
+    calls = 0
+
+    class SequenceSession(FakeSession):
+        def post(self, url, data=None):
+            nonlocal calls
+            calls += 1
+            return next(responses)
+
+    monkeypatch.setattr(places.aiohttp, "ClientSession", lambda timeout=None: SequenceSession())
+    monkeypatch.setattr("config.settings.external_retry_attempts", 1)
+    monkeypatch.setattr("config.settings.external_retry_base_delay_seconds", 0)
+
+    assert await places._request_overpass("query") == {"elements": []}
+    assert calls == 2
+
+
+async def test_request_overpass_does_not_retry_permanent_4xx(monkeypatch):
+    calls = 0
+
+    class CountingSession(FakeSession):
+        def post(self, url, data=None):
+            nonlocal calls
+            calls += 1
+            return FakeResponse(400)
+
+    monkeypatch.setattr(places.aiohttp, "ClientSession", lambda timeout=None: CountingSession())
+    monkeypatch.setattr("config.settings.external_retry_attempts", 3)
+    with pytest.raises(PlacesError, match="HTTP 400"):
+        await places._request_overpass("query")
+    assert calls == 1

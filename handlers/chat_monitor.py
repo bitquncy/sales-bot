@@ -112,7 +112,11 @@ async def add_chat_start(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(ChatMonitorFSM.waiting_chat)
 async def add_chat_received(message: Message, state: FSMContext) -> None:
-    refs = parse_chat_refs(message.text or "")
+    raw = message.text or ""
+    if len(raw) > 4096:
+        await safe_answer(message, "Список чатов слишком длинный (максимум 4096 символов).")
+        return
+    refs = parse_chat_refs(raw, max_refs=settings.chat_monitor_max_chats)
     if not refs:
         await safe_answer(message, "Не нашёл chat username/id. Пришли @username или числовой chat_id.")
         return
@@ -123,6 +127,7 @@ async def add_chat_received(message: Message, state: FSMContext) -> None:
             refs,
             default_chats=_env_default_chats(),
             default_min_score=settings.chat_monitor_min_score,
+            max_chats=settings.chat_monitor_max_chats,
         )
         config = repo.chat_monitor_settings_to_config(row)
     await state.clear()
@@ -205,8 +210,8 @@ async def chat_monitor_help(callback: CallbackQuery) -> None:
         "1. Убедись, что в .env заполнены CHAT_MONITOR_API_ID, "
         "CHAT_MONITOR_API_HASH, CHAT_MONITOR_PHONE и CHAT_MONITOR_SESSION_PATH.\n"
         "2. Добавь нужные открытые чаты кнопкой «Добавить чат».\n"
-        "3. Запусти отдельным процессом:\n"
-        "<code>venv\\Scripts\\python.exe -m chat_monitor.runner</code>\n\n"
+        "3. Перезапусти основной bot.py: Chat Monitor запускается внутри него. "
+        "Отдельный процесс запускать нельзя.\n\n"
         "Код Telethon обычно приходит не SMS, а в официальный Telegram-клиент. "
         "Проверь Telegram на этом номере, папку Archived/Service Notifications и формат телефона +7...",
         reply_markup=chat_monitor_kb(config.is_enabled, has_chats=bool(config.chats)),

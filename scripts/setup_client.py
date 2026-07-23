@@ -266,6 +266,8 @@ async def main(output_path: str, non_interactive: bool, env_file: str | None) ->
                 print("Отменено.")
                 return 1
         output.write_text(env_content, encoding="utf-8")
+        if os.name != "nt":
+            os.chmod(output, 0o600)
         print(f"\n✅ Файл {output} создан.")
 
     # ── Проверка Telegram Bot API ─────────────────────────────────────────────
@@ -279,7 +281,11 @@ async def main(output_path: str, non_interactive: bool, env_file: str | None) ->
         return 1
 
     # ── Инициализация БД ──────────────────────────────────────────────────────
-    print(f"\n🗄  Инициализируем БД: {db_url}")
+    from sqlalchemy.engine.url import make_url
+
+    parsed_url = make_url(db_url)
+    safe_db_url = parsed_url.set(password="***") if parsed_url.password else parsed_url
+    print(f"\n🗄  Инициализируем БД: {safe_db_url.render_as_string(hide_password=True)}")
     ok, result = await _init_database(db_url)
     if ok:
         print("  ✅ БД готова.")
@@ -295,7 +301,7 @@ async def main(output_path: str, non_interactive: bool, env_file: str | None) ->
         print("\nСледующие шаги:")
         print(f"  1. Проверь {output_path} и при необходимости отредактируй")
         print("  2. Запусти бота: python bot.py")
-        print("  3. Для Chat Monitor: python -m chat_monitor.runner")
+        print("  3. Chat Monitor запускается внутри bot.py; отдельный процесс не нужен")
         print("  4. Для автозапуска: см. deploy/README.md")
     return 0
 

@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from pathlib import Path
 
 from config import settings
 from chat_monitor.config_store import ChatMonitorConfig, normalize_chat_ref
@@ -9,8 +10,37 @@ from db.base import init_db, session_factory
 from chat_monitor.processor import candidate_from_event, process_candidate
 from db import repo
 from services.ai import AIError
+from utils.file_perms import restrict_file_permissions
+from utils.sentry import capture_exception
 
 logger = logging.getLogger(__name__)
+
+
+def ensure_session_path_ready() -> None:
+    """Ensure the Telethon session parent directory exists and is writable."""
+    session_path = Path(settings.chat_monitor_session_path)
+    candidates = [session_path]
+
+    # Render/Web platforms often have a writable /tmp but not a dedicated /app/session volume.
+    if session_path.is_absolute() and "tmp" not in {part.lower() for part in session_path.parts}:
+        candidates.append(Path("/tmp") / session_path.name)
+
+    last_error: Exception | None = None
+    for candidate in candidates:
+        try:
+            parent = candidate.parent
+            if str(parent) not in ("", "."):
+                parent.mkdir(parents=True, exist_ok=True)
+            probe = parent if str(parent) not in ("", ".") else Path.cwd()
+            if not probe.exists() or not probe.is_dir():
+                raise RuntimeError(f"Chat monitor session directory is unavailable: {probe}")
+            settings.chat_monitor_session_path = str(candidate)
+            return
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError(
+        f"Chat monitor session path is not writable: {settings.chat_monitor_session_path}"
+    ) from last_error
 
 
 def _ensure_ready() -> None:
@@ -97,8 +127,160 @@ async def _heartbeat_loop() -> None:
         await asyncio.sleep(interval)
 
 
-async def run() -> None:
+async def run_chat_monitor(bot, session_factory_arg) -> None:
+    """Запуск Chat Monitor как фоновой задачи внутри основного бота.
+    
+    Используется bot.py для запуска в одном процессе с ботом.
+    При отмене (CancelledError) завершается gracefully.
+    
+    Args:
+        bot: aiogram Bot instance (не используется, но передаётся для совместимости)
+        session_factory_arg: SQLAlchemy session factory (заменяет глобальный)
+    """
     _ensure_ready()
+    ensure_session_path_ready()
+    # SEC-FIX-1: session-файл — rootkey к аккаунту Telegram, только владельцу ОС
+    restrict_file_permissions(settings.chat_monitor_session_path)
+    try:
+        from telethon import TelegramClient, events
+    except ImportError as exc:
+        raise RuntimeError("Telethon is not installed. Run `pip install -r requirements-lock.txt`.") from exc
+
+    # Используем переданный session_factory вместо глобального
+    global session_factory
+    original_factory = session_factory
+    session_factory = session_factory_arg
+
+    try:
+        client = TelegramClient(
+            settings.chat_monitor_session_path,
+            settings.chat_monitor_api_id,
+            settings.chat_monitor_api_hash,
+        )
+
+        initial_config = await load_runtime_config()
+        logger.info(
+            "Chat monitor config: enabled=%s chats=%s min_score=%.2f",
+            initial_config.is_enabled,
+            len(initial_config.chats),
+            initial_config.min_score,
+        )
+
+        candidate_queue: asyncio.Queue[tuple[object, ChatMonitorConfig]] = asyncio.Queue(
+            maxsize=settings.chat_monitor_queue_size
+        )
+
+        async def candidate_worker(worker_id: int) -> None:
+            while True:
+                candidate, config = await candidate_queue.get()
+                try:
+                    lead = await process_candidate(
+                        candidate,
+                        session_factory,
+                        owner_tg_id=config.owner_tg_id,
+                        min_score=config.min_score,
+                    )
+                    if lead is not None:
+                        logger.info(
+                            "Chat lead saved: id=%s chat=%s worker=%s",
+                            lead.id,
+                            lead.source_chat,
+                            worker_id,
+                        )
+                except AIError as exc:
+                    logger.warning("LLM error in chat monitor worker: %s", exc)
+                except Exception as exc:
+                    logger.exception("Chat monitor worker failed")
+                    capture_exception(exc)
+                finally:
+                    candidate_queue.task_done()
+
+        worker_tasks = [
+            asyncio.create_task(candidate_worker(index), name=f"chat-monitor-worker-{index}")
+            for index in range(settings.chat_monitor_worker_count)
+        ]
+
+        @client.on(events.NewMessage())
+        async def on_new_message(event) -> None:
+            try:
+                config = await load_runtime_config()
+                if not config.is_enabled or not config.chats:
+                    return
+                if not await event_matches_chat_refs(event, config.chats):
+                    return
+                candidate = await candidate_from_event(event)
+                if candidate is None:
+                    return
+                try:
+                    candidate_queue.put_nowait((candidate, config))
+                except asyncio.QueueFull:
+                    logger.warning(
+                        "Chat monitor queue full (%s), dropping message chat=%s user=%s",
+                        settings.chat_monitor_queue_size,
+                        candidate.source_chat,
+                        candidate.user_id,
+                    )
+            except Exception as exc:
+                logger.exception("Chat monitor message processing failed")
+                # MONITORING-2: необработанный сбой обработки — в Sentry
+                capture_exception(exc)
+
+        logger.info(
+            "Chat Monitor: authorizing phone ending %s (force_sms=%s)",
+            _mask_phone(settings.chat_monitor_phone),
+            settings.chat_monitor_force_sms,
+        )
+        
+        await client.start(
+            phone=normalize_phone(settings.chat_monitor_phone),
+            force_sms=settings.chat_monitor_force_sms,
+        )
+        restrict_file_permissions(settings.chat_monitor_session_path)
+        
+        me = await client.get_me()
+        logger.info(
+            "Chat Monitor: authenticated as user_id=%s username=%s",
+            getattr(me, "id", None),
+            getattr(me, "username", None),
+        )
+
+        # Запускаем heartbeat параллельно
+        heartbeat_task = asyncio.create_task(_heartbeat_loop())
+        
+        try:
+            await client.run_until_disconnected()
+        except asyncio.CancelledError:
+            logger.info("Chat Monitor: graceful shutdown requested")
+            raise
+        finally:
+            heartbeat_task.cancel()
+            for task in worker_tasks:
+                task.cancel()
+            try:
+                await asyncio.wait_for(heartbeat_task, timeout=1.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+            await asyncio.gather(*worker_tasks, return_exceptions=True)
+            await client.disconnect()
+            logger.info("Chat Monitor: disconnected")
+    finally:
+        # Восстанавливаем глобальный session_factory
+        session_factory = original_factory
+
+
+async def run() -> None:
+    """Standalone запуск Chat Monitor (старый способ через python -m chat_monitor.runner).
+    
+    Для обратной совместимости. Новый способ: запуск вместе с ботом через bot.py.
+    """
+    if settings.environment.lower() == "production":
+        raise RuntimeError(
+            "Standalone Chat Monitor is disabled in production; run it embedded in bot.py"
+        )
+    _ensure_ready()
+    ensure_session_path_ready()
+    # SEC-FIX-1: session-файл — rootkey к аккаунту Telegram, только владельцу ОС
+    restrict_file_permissions(settings.chat_monitor_session_path)
     try:
         from telethon import TelegramClient, events
     except ImportError as exc:

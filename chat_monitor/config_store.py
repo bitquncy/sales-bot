@@ -1,10 +1,14 @@
 """Хранение и нормализация пользовательских настроек Chat Monitor."""
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Iterable
 
 DEFAULT_MIN_SCORE = 0.7
+MAX_CHAT_REF_LENGTH = 64
+_USERNAME_RE = re.compile(r"^@[A-Za-z0-9_]{3,32}$")
+_CHAT_ID_RE = re.compile(r"^-?\d{1,20}$")
 
 
 @dataclass(slots=True)
@@ -23,24 +27,27 @@ def normalize_chat_ref(raw: str) -> str | None:
     value = value.replace("https://t.me/", "").replace("http://t.me/", "")
     value = value.replace("t.me/", "")
     value = value.split("?", 1)[0].strip().rstrip("/")
-    if not value:
+    if not value or len(value) > MAX_CHAT_REF_LENGTH:
         return None
-    if value.lstrip("-").isdigit():
+    if _CHAT_ID_RE.fullmatch(value):
         return value
     if value.startswith("@"):
         value = value[1:]
     if not value:
         return None
-    return f"@{value}"
+    value = f"@{value}"
+    return value if _USERNAME_RE.fullmatch(value) else None
 
 
-def parse_chat_refs(text: str) -> list[str]:
+def parse_chat_refs(text: str, max_refs: int = 100) -> list[str]:
     """Парсит usernames/chat_id из строки, разделённой запятыми или переносами."""
     refs: list[str] = []
     for part in text.replace("\n", ",").split(","):
         normalized = normalize_chat_ref(part)
         if normalized and normalized not in refs:
             refs.append(normalized)
+            if len(refs) >= max_refs:
+                break
     return refs
 
 
