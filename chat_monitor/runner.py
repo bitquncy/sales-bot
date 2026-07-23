@@ -231,10 +231,34 @@ async def run_chat_monitor(bot, session_factory_arg) -> None:
             settings.chat_monitor_force_sms,
         )
         
-        await client.start(
-            phone=normalize_phone(settings.chat_monitor_phone),
-            force_sms=settings.chat_monitor_force_sms,
-        )
+        # На Render/без интерактивного терминала client.start() упадёт с EOFError
+        # при попытке прочитать код авторизации из stdin. Проверяем наличие сессии
+        # и используем code_callback с человекочитаемой ошибкой.
+        session_file = Path(settings.chat_monitor_session_path)
+        if not session_file.exists():
+            logger.warning(
+                "Chat Monitor: session file %s not found. "
+                "Authentication required — запусти бота локально с интерактивным "
+                "терминалом или используй QR-логин (python scripts/telethon_qr_login.py) "
+                "чтобы создать .session файл, затем загрузи его на сервер.",
+                settings.chat_monitor_session_path,
+            )
+            raise RuntimeError(
+                "Chat Monitor requires an existing .session file. "
+                "Run locally with TELEGRAM QR first."
+            )
+        
+        try:
+            await client.start(
+                phone=normalize_phone(settings.chat_monitor_phone),
+                force_sms=settings.chat_monitor_force_sms,
+            )
+        except EOFError:
+            logger.error(
+                "Chat Monitor: EOFError при авторизации — нет интерактивного "
+                "терминала (Render). Запусти локально для создания .session файла."
+            )
+            raise
         restrict_file_permissions(settings.chat_monitor_session_path)
         
         me = await client.get_me()
